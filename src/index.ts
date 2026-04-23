@@ -1,5 +1,3 @@
-import fs from 'node:fs'
-import path from 'node:path'
 import type { OpenACPPlugin, PluginContext, InstallContext } from '@openacp/plugin-sdk'
 import { AUTO_APPROVED_COMMANDS } from './types.js'
 import { WatcherStore } from './storage/watcher-store.js'
@@ -63,21 +61,14 @@ const plugin: OpenACPPlugin = {
   async setup(ctx: PluginContext): Promise<void> {
     const config = ctx.pluginConfig as { maxConcurrentSessions?: number }
 
-    // Read chatId from Telegram plugin settings instead of duplicating it in our own config.
-    const telegramSettingsPath = path.join(ctx.instanceRoot, 'plugins', '@openacp/telegram', 'settings.json')
-    let telegramChatId: number | null = null
-    try {
-      const raw = fs.readFileSync(telegramSettingsPath, 'utf-8')
-      const settings = JSON.parse(raw) as Record<string, unknown>
-      if (typeof settings.chatId === 'number') telegramChatId = settings.chatId
-    } catch {
-      // file missing or unreadable — Telegram not configured
-    }
-
-    if (!telegramChatId) {
-      ctx.log.warn('git-watcher: Telegram chatId not found — configure Telegram first: openacp plugin configure @openacp/telegram')
+    // Get chatId from the live Telegram adapter service — avoids reading config from disk
+    // and implicitly confirms Telegram is active and fully configured.
+    const telegramAdapter = ctx.getService<{ getChatId(): number }>('adapter:telegram')
+    if (!telegramAdapter) {
+      ctx.log.warn('git-watcher: Telegram adapter not active — configure and enable @openacp/telegram first')
       return
     }
+    const telegramChatId = telegramAdapter.getChatId()
 
     // --- Initialize shared state ---
     const watcherStore = new WatcherStore(ctx.storage)
