@@ -74,8 +74,12 @@ const plugin: OpenACPPlugin = {
     const workspaceSync = new WorkspaceSync(ctx.storage.getDataDir())
     const concurrencyGate = new ConcurrencyGate(config.maxConcurrentSessions ?? 3)
 
-    let currentTunnelUrl = ''
-    const getCurrentTunnelUrl = (): string => currentTunnelUrl
+    // Query the live tunnel service every time — we may have loaded after
+    // tunnel:started already fired, so a cached value could be stale/missing.
+    const getCurrentTunnelUrl = (): string => {
+      const svc = ctx.getService<{ getPublicUrl(): string }>('tunnel')
+      return svc?.getPublicUrl() ?? ''
+    }
 
     // --- Session factory ---
     // ctx.sessions is typed as SessionManager (index signature only in published SDK),
@@ -156,15 +160,12 @@ const plugin: OpenACPPlugin = {
       ctx.log.info('git-watcher: webhook routes registered')
     }
 
-    // --- Tunnel event listeners ---
+    // Re-register GitHub webhooks whenever the tunnel URL changes (start or restart).
+    // Current URL is always queried fresh via getCurrentTunnelUrl().
     ctx.on('tunnel:started', async (data: unknown) => {
-      currentTunnelUrl = (data as { url: string }).url
-      ctx.log.info(`git-watcher: tunnel started at ${currentTunnelUrl}`)
-      await registerWebhooksForAll(watcherStore, currentTunnelUrl, ctx.log)
-    })
-
-    ctx.on('tunnel:stopped', () => {
-      currentTunnelUrl = ''
+      const url = (data as { url: string }).url
+      ctx.log.info(`git-watcher: tunnel started at ${url}`)
+      await registerWebhooksForAll(watcherStore, url, ctx.log)
     })
 
     // --- Boot recovery: reset interrupted jobs and drain pending queues ---
