@@ -22,8 +22,7 @@ export interface PairWorkerDeps {
     agentName: string
     workingDir: string
     autoApprovedCommands: string[]
-    telegramChatId: string
-    telegramTopicId: number
+    threadTitle?: string
   }) => Promise<{ sessionId: string }>
   promptSession: (sessionId: string, prompt: string) => Promise<string>
   destroySession?: (sessionId: string) => Promise<void>
@@ -130,8 +129,7 @@ export class PairWorker {
           agentName: downstream.agent,
           workingDir: workspaceDir,
           autoApprovedCommands: this.deps.autoApprovedCommands,
-          telegramChatId: '',  // set by caller via plugin config
-          telegramTopicId: downstream.telegramTopicId,
+          threadTitle: `git-watcher: ${downstream.repo} #${job.prNumber}`,
         })
         sessionId = created.sessionId
 

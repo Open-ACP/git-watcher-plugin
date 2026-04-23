@@ -81,11 +81,19 @@ const plugin: OpenACPPlugin = {
       return svc?.getPublicUrl() ?? ''
     }
 
-    // --- Session factory ---
-    // ctx.sessions is typed as SessionManager (index signature only in published SDK),
-    // so we use `as any` to access the concrete createSession / getSession methods.
+    // Use the high-level core.createSession() so the Telegram thread is auto-created
+    // and the session bridge is wired. SessionManager.createSession alone skips bridge/thread.
+    const core = ctx.core as {
+      createSession: (params: {
+        channelId: string
+        agentName: string
+        workingDirectory: string
+        createThread?: boolean
+        threadTitle?: string
+        autoApprovedCommands?: string[]
+      }) => Promise<{ id: string }>
+    }
     const sessionManager = ctx.sessions as unknown as {
-      createSession: (...args: unknown[]) => Promise<{ id: string }>
       getSession: (id: string) => { on: (event: string, handler: (e: unknown) => void) => void; prompt: (text: string, a: undefined, b: undefined) => Promise<void> } | undefined
     }
 
@@ -94,16 +102,18 @@ const plugin: OpenACPPlugin = {
       agentName: string
       workingDir: string
       autoApprovedCommands: string[]
-      telegramChatId: string
-      telegramTopicId: number
+      threadTitle?: string
     }): Promise<{ sessionId: string }> => {
       await concurrencyGate.acquire()
       try {
-        const session = await sessionManager.createSession(
-          opts.channelId,
-          opts.agentName,
-          opts.workingDir,
-        )
+        const session = await core.createSession({
+          channelId: 'telegram',
+          agentName: opts.agentName,
+          workingDirectory: opts.workingDir,
+          createThread: true,
+          threadTitle: opts.threadTitle ?? `🔄 ${opts.agentName} — ${opts.channelId}`,
+          autoApprovedCommands: opts.autoApprovedCommands,
+        })
         concurrencyGate.release()
         return { sessionId: session.id }
       } catch (err) {
