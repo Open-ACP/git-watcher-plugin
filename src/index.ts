@@ -126,20 +126,34 @@ const plugin: OpenACPPlugin = {
     // the agent emits a 'result' or 'error' event.
     const promptSessionFn = async (sessionId: string, prompt: string): Promise<string> => {
       const session = sessionManager.getSession(sessionId)
-      if (!session) throw new Error(`Session ${sessionId} not found`)
+      if (!session) throw new Error(`Session ${sessionId} not found in SessionManager`)
 
       return new Promise<string>((resolve, reject) => {
         let output = ''
         const handler = (event: unknown) => {
-          const e = event as { type: string; text?: string }
+          const e = event as { type: string; text?: string; error?: unknown; stopReason?: string }
           if (e.type === 'text_delta' && e.text) output += e.text
           if (e.type === 'result' || e.type === 'error') {
-            if (e.type === 'error') reject(new Error(output || 'Agent error'))
-            else resolve(output)
+            if (e.type === 'error') {
+              const reason = (e.error && typeof e.error === 'object' && 'message' in e.error)
+                ? String((e.error as { message: unknown }).message)
+                : JSON.stringify(e.error)
+              ctx.log.error('git-watcher: agent event error', { sessionId, reason, outputTail: output.slice(-300) })
+              reject(new Error(`Agent error: ${reason}`))
+            } else {
+              if (e.stopReason && e.stopReason !== 'end_turn') {
+                ctx.log.warn('git-watcher: agent stopped unexpectedly', { sessionId, stopReason: e.stopReason })
+              }
+              resolve(output)
+            }
           }
         }
         session.on('agent_event', handler)
-        session.prompt(prompt, undefined, undefined).catch(reject)
+        session.prompt(prompt, undefined, undefined).catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err)
+          ctx.log.error('git-watcher: session.prompt threw', { sessionId, error: msg })
+          reject(err instanceof Error ? err : new Error(msg))
+        })
       })
     }
 

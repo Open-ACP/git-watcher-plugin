@@ -71,6 +71,7 @@ export class WorkspaceSync {
 function run(cmd: string, args: string[]): void {
   const result = spawnSync(cmd, args, { encoding: 'utf8', stdio: 'pipe' })
   if (result.status !== 0) {
-    throw new Error(`${cmd} ${args.join(' ')} failed: ${result.stderr}`)
+    const err = (result.stderr || result.stdout || `exit ${result.status}`).trim()
+    throw new Error(`${cmd} ${args.join(' ')} failed: ${err}`)
   }
 }
