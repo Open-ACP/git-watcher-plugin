@@ -61,14 +61,11 @@ const plugin: OpenACPPlugin = {
   async setup(ctx: PluginContext): Promise<void> {
     const config = ctx.pluginConfig as { maxConcurrentSessions?: number }
 
-    // Get chatId from the live Telegram adapter service — avoids reading config from disk
-    // and implicitly confirms Telegram is active and fully configured.
-    const telegramAdapter = ctx.getService<{ getChatId(): number }>('adapter:telegram')
-    if (!telegramAdapter) {
+    // Confirm Telegram is active — git-watcher relies on it for session visibility.
+    if (!ctx.getService('adapter:telegram')) {
       ctx.log.warn('git-watcher: Telegram adapter not active — configure and enable @openacp/telegram first')
       return
     }
-    const telegramChatId = telegramAdapter.getChatId()
 
     // --- Initialize shared state ---
     const watcherStore = new WatcherStore(ctx.storage)
