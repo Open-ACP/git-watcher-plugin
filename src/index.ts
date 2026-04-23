@@ -6,7 +6,7 @@ import { RunLog } from './storage/run-log.js'
 import { WorkspaceSync } from './workers/workspace-sync.js'
 import { PairWorkerPool } from './workers/pair-worker.js'
 import { ConcurrencyGate } from './workers/concurrency-gate.js'
-import { createWebhookRoutes } from './hooks/webhook-receiver.js'
+import { createWebhookRoutes, buildWebhookHandler, setWebhookHandler } from './hooks/webhook-receiver.js'
 import { registerWebhooksForAll } from './hooks/tunnel-listener.js'
 import { bootRecovery } from './hooks/boot-recovery.js'
 import { registerCommands } from './commands/index.js'
@@ -177,16 +177,16 @@ const plugin: OpenACPPlugin = {
     if (!apiServer) {
       ctx.log.warn('git-watcher: api-server service not found — webhook receiver unavailable')
     } else {
-      const routes = createWebhookRoutes(
-        watcherStore,
-        queueStore,
-        (watcherId, downId) => {
+      // Register the route once (no-op on hot-reload, but that's OK — the route
+      // delegates to whatever handler is currently stored in the global registry).
+      apiServer.registerPlugin('/', createWebhookRoutes(ctx.log), { auth: false })
+      // Always install/refresh the handler with the current plugin instance's state.
+      setWebhookHandler(
+        buildWebhookHandler(watcherStore, queueStore, (watcherId, downId) => {
           workerPool.notify(watcherId, downId)
-        },
-        ctx.log,
+        }, ctx.log),
       )
-      apiServer.registerPlugin('/', routes, { auth: false })
-      ctx.log.info('git-watcher: webhook routes registered')
+      ctx.log.info('git-watcher: webhook handler registered')
     }
 
     // Re-register GitHub webhooks whenever the tunnel URL changes (start or restart).

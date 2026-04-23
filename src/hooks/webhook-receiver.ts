@@ -5,6 +5,29 @@ import type { QueueStore } from '../storage/queue-store.js'
 import type { Watcher } from '../types.js'
 import { nanoid } from 'nanoid'
 
+type WebhookHandlerFn = (
+  req: FastifyRequest<{ Params: { watcherId: string } }>,
+  reply: FastifyReply,
+) => Promise<unknown>
+
+/**
+ * ApiServer.registerPlugin is a no-op after Fastify boots, so on hot-reload
+ * our new handler is never wired to the route. We use globalThis + Symbol.for()
+ * as a re-import-safe registry: the Fastify route (registered once on first
+ * boot) looks up the handler here every request, and each plugin setup updates
+ * the slot with the latest handler.
+ */
+const HANDLER_KEY = Symbol.for('@openacp/git-watcher/webhook-handler-v1')
+type GlobalSlot = Record<symbol, WebhookHandlerFn | undefined>
+
+export function setWebhookHandler(handler: WebhookHandlerFn): void {
+  ;(globalThis as unknown as GlobalSlot)[HANDLER_KEY] = handler
+}
+
+function getWebhookHandler(): WebhookHandlerFn | undefined {
+  return (globalThis as unknown as GlobalSlot)[HANDLER_KEY]
+}
+
 interface DeliveryCache {
   has(id: string): boolean
   add(id: string): void
@@ -39,26 +62,23 @@ function isMergedPR(payload: Record<string, unknown>): boolean {
   )
 }
 
+/**
+ * Build the Fastify-level route (registered once). It does NOT hold the real
+ * handler — it delegates to whatever is stored via `setWebhookHandler()`.
+ * This lets hot-reload swap logic without needing to re-register the route.
+ */
 export function createWebhookRoutes(
-  watcherStore: WatcherStore,
-  queueStore: QueueStore,
-  onNewJob: (watcherId: string, downstreamId: string) => void,
   log: {
     info: (msg: string, ctx?: unknown) => void
     warn: (msg: string, ctx?: unknown) => void
     error: (msg: string, ctx?: unknown) => void
   },
 ): FastifyPluginAsync {
-  const cache = makeDeliveryCache()
-
   return async (fastify) => {
-    // Fastify already has a default application/json parser (which parses to object).
-    // We need the RAW bytes for HMAC verification, so replace the default parser for our route.
-    // Replacement is scoped to this Fastify plugin instance by nature of registration.
     try {
       fastify.removeContentTypeParser('application/json')
     } catch {
-      // no-op — parser may not exist at this scope
+      // parser may not exist at this scope
     }
     try {
       fastify.addContentTypeParser(
@@ -74,9 +94,14 @@ export function createWebhookRoutes(
 
     fastify.post<{ Params: { watcherId: string } }>(
       '/git-watcher/webhooks/:watcherId',
-      async (req: FastifyRequest<{ Params: { watcherId: string } }>, reply: FastifyReply) => {
+      async (req, reply) => {
+        const handler = getWebhookHandler()
+        if (!handler) {
+          log.error('git-watcher: webhook hit but no handler registered (plugin not ready)')
+          return reply.status(503).send({ error: 'Service not ready' })
+        }
         try {
-          return await handleWebhook(req, reply, watcherStore, queueStore, onNewJob, cache, log)
+          return await handler(req, reply)
         } catch (err) {
           const errObj = err instanceof Error ? err : new Error(String(err))
           log.error('git-watcher: webhook handler threw', {
@@ -93,6 +118,21 @@ export function createWebhookRoutes(
       },
     )
   }
+}
+
+/** Build the real handler closure for the current plugin instance. */
+export function buildWebhookHandler(
+  watcherStore: WatcherStore,
+  queueStore: QueueStore,
+  onNewJob: (watcherId: string, downstreamId: string) => void,
+  log: {
+    info: (msg: string, ctx?: unknown) => void
+    warn: (msg: string, ctx?: unknown) => void
+    error: (msg: string, ctx?: unknown) => void
+  },
+): WebhookHandlerFn {
+  const cache = makeDeliveryCache()
+  return (req, reply) => handleWebhook(req, reply, watcherStore, queueStore, onNewJob, cache, log)
 }
 
 async function handleWebhook(
