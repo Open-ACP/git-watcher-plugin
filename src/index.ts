@@ -177,9 +177,14 @@ const plugin: OpenACPPlugin = {
     if (!apiServer) {
       ctx.log.warn('git-watcher: api-server service not found — webhook receiver unavailable')
     } else {
-      const routes = createWebhookRoutes(watcherStore, queueStore, (watcherId, downId) => {
-        workerPool.notify(watcherId, downId)
-      })
+      const routes = createWebhookRoutes(
+        watcherStore,
+        queueStore,
+        (watcherId, downId) => {
+          workerPool.notify(watcherId, downId)
+        },
+        ctx.log,
+      )
       apiServer.registerPlugin('/', routes, { auth: false })
       ctx.log.info('git-watcher: webhook routes registered')
     }
