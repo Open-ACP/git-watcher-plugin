@@ -19,21 +19,26 @@ export function createGithubWebhook(opts: {
 }): CreatedWebhook {
   const secret = crypto.randomBytes(16).toString('hex')
 
+  // Use JSON input (stdin) for reliability. `gh api -f` has quirky handling of
+  // nested keys like `config[content_type]` — some versions pass them as literal
+  // strings, leaving GitHub to fall back to content_type=form, which is why we
+  // saw form-urlencoded bodies instead of JSON.
+  const body = JSON.stringify({
+    name: 'web',
+    active: true,
+    events: ['pull_request'],
+    config: {
+      url: opts.webhookUrl,
+      content_type: 'json',
+      secret,
+      insecure_ssl: '0',
+    },
+  })
+
   const result = spawnSync(
     'gh',
-    [
-      'api',
-      `repos/${opts.repo}/hooks`,
-      '-X', 'POST',
-      '-f', 'name=web',
-      '-F', 'active=true',
-      '-f', 'events[]=pull_request',
-      '-f', `config[url]=${opts.webhookUrl}`,
-      '-f', 'config[content_type]=json',
-      '-f', `config[secret]=${secret}`,
-      '-f', 'config[insecure_ssl]=0',
-    ],
-    { encoding: 'utf8', stdio: 'pipe' },
+    ['api', `repos/${opts.repo}/hooks`, '--method', 'POST', '--input', '-'],
+    { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], input: body },
   )
 
   if (result.status !== 0) {

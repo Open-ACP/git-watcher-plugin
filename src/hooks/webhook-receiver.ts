@@ -75,21 +75,30 @@ export function createWebhookRoutes(
   },
 ): FastifyPluginAsync {
   return async (fastify) => {
-    try {
-      fastify.removeContentTypeParser('application/json')
-    } catch {
-      // parser may not exist at this scope
-    }
-    try {
-      fastify.addContentTypeParser(
-        'application/json',
-        { parseAs: 'buffer' },
-        (_req: FastifyRequest, body: Buffer, done: (err: Error | null, body: Buffer) => void) => done(null, body),
-      )
-    } catch (err) {
-      log.warn('git-watcher: failed to register raw-body parser', {
-        error: err instanceof Error ? err.message : String(err),
-      })
+    // GitHub may send either `application/json` (content_type=json) or
+    // `application/x-www-form-urlencoded` (content_type=form, the GitHub default).
+    // We need RAW bytes for HMAC verification, so register a raw-body parser
+    // for both types.
+    const rawPassthrough = (
+      _req: FastifyRequest,
+      body: Buffer,
+      done: (err: Error | null, body: Buffer) => void,
+    ): void => done(null, body)
+
+    for (const ct of ['application/json', 'application/x-www-form-urlencoded']) {
+      try {
+        fastify.removeContentTypeParser(ct)
+      } catch {
+        // parser may not exist at this scope
+      }
+      try {
+        fastify.addContentTypeParser(ct, { parseAs: 'buffer' }, rawPassthrough)
+      } catch (err) {
+        log.warn('git-watcher: failed to register raw-body parser', {
+          contentType: ct,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
     }
 
     fastify.post<{ Params: { watcherId: string } }>(
@@ -207,7 +216,22 @@ async function handleWebhook(
     return reply.status(200).send({ status: 'ignored' })
   }
 
-  const payload = JSON.parse(rawBody.toString()) as Record<string, unknown>
+  // Body may be either raw JSON (content_type=json) or form-urlencoded
+  // `payload=<json>` (content_type=form, the GitHub default). Extract accordingly.
+  const contentType = (req.headers['content-type'] as string | undefined) ?? ''
+  let payloadJson: string
+  if (contentType.includes('application/x-www-form-urlencoded')) {
+    const parsed = new URLSearchParams(rawBody.toString())
+    const encoded = parsed.get('payload')
+    if (!encoded) {
+      log.warn('git-watcher: form-urlencoded body missing "payload" field', { watcherId })
+      return reply.status(400).send({ error: 'Missing payload field' })
+    }
+    payloadJson = encoded
+  } else {
+    payloadJson = rawBody.toString()
+  }
+  const payload = JSON.parse(payloadJson) as Record<string, unknown>
   const action = payload.action as string | undefined
   const pr = payload.pull_request as Record<string, unknown> | undefined
   const prNumberEarly = pr?.number as number | undefined
