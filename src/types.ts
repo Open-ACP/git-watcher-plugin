@@ -65,11 +65,15 @@ export interface RunLogEntry {
 
 // Patterns use micromatch glob syntax with ** to cross path separators.
 // Union {a,b} syntax handles commands with optional slash-containing args.
+// Glob patterns matched against bash command descriptions. The micromatch
+// union `{a,a/**}` handles commands whose args may or may not contain slashes
+// (since `*` does not cross `/`).
 export const AUTO_APPROVED_COMMANDS = [
-  '{gh pr view *,gh pr view */**}',
-  '{gh pr diff *,gh pr diff */**}',
-  'gh auth status',
+  // All gh CLI subcommands (pr view/diff, issue create/list, api, auth, ...)
+  '{gh,gh *,gh */**}',
+  // Read-only git operations inside the workspace
   'git -C */**',
+  // Common file-reading tools used for code exploration
   'cat */**',
   'grep * */**',
   'find */**',
