@@ -1,0 +1,231 @@
+import { nanoid } from 'nanoid'
+import type { PluginContext } from '@openacp/plugin-sdk'
+import type { WatcherStore } from '../storage/watcher-store.js'
+import type { QueueStore } from '../storage/queue-store.js'
+import type { RunLog } from '../storage/run-log.js'
+import type { PairWorkerPool } from '../workers/pair-worker.js'
+import type { PluginConfig, Downstream } from '../types.js'
+import { DEFAULT_PROMPT_TEMPLATE } from '../types.js'
+import { registerWebhooksForAll } from '../hooks/tunnel-listener.js'
+
+export function registerCommands(
+  ctx: PluginContext,
+  watcherStore: WatcherStore,
+  queueStore: QueueStore,
+  runLog: RunLog,
+  workerPool: PairWorkerPool,
+  pluginConfig: PluginConfig,
+  getCurrentTunnelUrl: () => string,
+): void {
+  // /gitwatch <subcommand> — single entry-point command covering all git-watcher operations
+  ctx.registerCommand({
+    name: 'gitwatch',
+    description: 'git-watcher: list, add, remove, show, status, queue, logs, test, retry, doctor',
+    usage: '<subcommand> [args]',
+    category: 'plugin',
+    handler: async (args) => {
+      const parts = args.raw.trim().split(/\s+/)
+      const sub = parts[0] ?? 'list'
+
+      switch (sub) {
+        case 'list':
+        case '': {
+          const watchers = await watcherStore.list()
+          if (watchers.length === 0) {
+            return { type: 'text', text: 'No watchers configured. Use /gitwatch add to create one.' }
+          }
+          const lines = watchers.map((w) =>
+            `• **${w.id}** — upstream: \`${w.upstream.repo}\` (${w.upstream.branch}) → ${w.downstreams.length} downstream(s)`,
+          )
+          return { type: 'text', text: `**Watchers (${watchers.length}):**\n${lines.join('\n')}` }
+        }
+
+        case 'show': {
+          const id = parts[1]
+          if (!id) return { type: 'error', message: 'Usage: /gitwatch show <watcherId>' }
+          const watcher = await watcherStore.get(id)
+          if (!watcher) return { type: 'error', message: `Watcher "${id}" not found` }
+          const lines = [
+            `**${watcher.id}**`,
+            `Upstream: \`${watcher.upstream.repo}\` @ \`${watcher.upstream.branch}\``,
+            `Webhook ID: ${watcher.upstream.webhookId || 'not registered'}`,
+            `Downstreams (${watcher.downstreams.length}):`,
+            ...watcher.downstreams.map((d) =>
+              `  • **${d.id}** — \`${d.repo}\` @ \`${d.branch}\` [${d.sessionStrategy}]`,
+            ),
+          ]
+          return { type: 'text', text: lines.join('\n') }
+        }
+
+        case 'add': {
+          const tunnelUrl = getCurrentTunnelUrl()
+          if (!tunnelUrl) return { type: 'error', message: 'Tunnel not active. Wait for tunnel to start.' }
+
+          return {
+            type: 'text',
+            text: 'Use the interactive wizard: /gitwatch add is a multi-step process.\n\n' +
+              'For now, use the following steps:\n' +
+              '1. Create a watcher with /gitwatch add <upstream-repo> <branch>\n' +
+              '2. Add downstreams with /gitwatch downstream add <watcherId> <downstream-repo> <branch>',
+          }
+        }
+
+        case 'downstream': {
+          const dsub = parts[1]
+
+          if (dsub === 'add') {
+            const watcherId = parts[2]
+            const repo = parts[3]
+            const branch = parts[4] ?? 'main'
+
+            if (!watcherId || !repo) {
+              return { type: 'error', message: 'Usage: /gitwatch downstream add <watcherId> <repo> <branch>' }
+            }
+            const watcher = await watcherStore.get(watcherId)
+            if (!watcher) return { type: 'error', message: `Watcher "${watcherId}" not found` }
+
+            const downstreamId = `down_${nanoid(6)}`
+            const downstream: Downstream = {
+              id: downstreamId,
+              repo,
+              branch,
+              telegramTopicId: 0,
+              issueLabels: ['sync'],
+              promptTemplate: DEFAULT_PROMPT_TEMPLATE,
+              agent: 'claude-opus-4-7',
+              sessionStrategy: 'per-trigger',
+              sessionLimits: { maxTurns: 10, maxAge: '24h' },
+            }
+            watcher.downstreams.push(downstream)
+            await watcherStore.save(watcher)
+            await queueStore.addPairToIndex(watcherId, downstreamId)
+            return { type: 'text', text: `Added downstream ${downstreamId}: \`${repo}\` @ \`${branch}\`` }
+          }
+
+          if (dsub === 'remove') {
+            const watcherId = parts[2]
+            const downId = parts[3]
+            if (!watcherId || !downId) {
+              return { type: 'error', message: 'Usage: /gitwatch downstream remove <watcherId> <downstreamId>' }
+            }
+            const watcher = await watcherStore.get(watcherId)
+            if (!watcher) return { type: 'error', message: `Watcher "${watcherId}" not found` }
+            watcher.downstreams = watcher.downstreams.filter((d) => d.id !== downId)
+            await watcherStore.save(watcher)
+            await queueStore.removePairFromIndex(watcherId, downId)
+            workerPool.delete(watcherId, downId)
+            return { type: 'text', text: `Removed downstream ${downId}` }
+          }
+
+          return { type: 'error', message: 'Usage: /gitwatch downstream <add|remove> ...' }
+        }
+
+        case 'remove': {
+          const watcherId = parts[1]
+          if (!watcherId) return { type: 'error', message: 'Usage: /gitwatch remove <watcherId>' }
+          await watcherStore.delete(watcherId)
+          return { type: 'text', text: `Removed watcher ${watcherId}` }
+        }
+
+        case 'status': {
+          const watchers = await watcherStore.list()
+          const lines = ['**git-watcher status:**']
+          for (const w of watchers) {
+            lines.push(`\n**${w.id}** (${w.upstream.repo})`)
+            for (const d of w.downstreams) {
+              const items = await queueStore.getItems(w.id, d.id)
+              const pending = items.filter((i) => i.status === 'pending').length
+              const processing = items.filter((i) => i.status === 'processing').length
+              const failed = items.filter((i) => i.status === 'failed').length
+              lines.push(`  • ${d.id} (${d.repo}): pending=${pending} processing=${processing} failed=${failed}`)
+            }
+          }
+          return { type: 'text', text: lines.join('\n') }
+        }
+
+        case 'queue': {
+          const watcherId = parts[1]
+          const downId = parts[2]
+          if (!watcherId || !downId) {
+            return { type: 'error', message: 'Usage: /gitwatch queue <watcherId> <downstreamId>' }
+          }
+          const items = await queueStore.getItems(watcherId, downId)
+          if (items.length === 0) return { type: 'text', text: 'Queue is empty' }
+          const lines = items.map((i) =>
+            `• ${i.id} [${i.status}] PR #${i.prNumber} (attempts: ${i.attempts})${i.error ? ` — ${i.error}` : ''}`,
+          )
+          return { type: 'text', text: `**Queue (${items.length}):**\n${lines.join('\n')}` }
+        }
+
+        case 'logs': {
+          const watcherId = parts[1]
+          const downId = parts[2]
+          const entries = watcherId && downId
+            ? await runLog.getForPair(watcherId, downId)
+            : await runLog.getAll()
+          if (entries.length === 0) return { type: 'text', text: 'No log entries' }
+          const recent = entries.slice(-10)
+          const lines = recent.map((e) =>
+            `• [${e.status}] ${e.jobId} — PR #${e.prNumber} → ${e.downstream}${e.issueUrl ? ` → ${e.issueUrl}` : ''}`,
+          )
+          return { type: 'text', text: `**Recent logs (last ${recent.length}):**\n${lines.join('\n')}` }
+        }
+
+        case 'retry': {
+          const jobId = parts[1]
+          const watcherId = parts[2]
+          const downId = parts[3]
+          if (!jobId || !watcherId || !downId) {
+            return { type: 'error', message: 'Usage: /gitwatch retry <jobId> <watcherId> <downstreamId>' }
+          }
+          const items = await queueStore.getItems(watcherId, downId)
+          const job = items.find((i) => i.id === jobId)
+          if (!job) return { type: 'error', message: `Job "${jobId}" not found` }
+          job.status = 'pending'
+          job.attempts = 0
+          job.retryAfter = undefined
+          job.error = undefined
+          await queueStore.updateItem(job)
+          workerPool.notify(watcherId, downId)
+          return { type: 'text', text: `Retrying job ${jobId}` }
+        }
+
+        case 'doctor': {
+          const lines = ['**git-watcher doctor:**']
+          // Check gh auth
+          try {
+            const { execSync } = await import('node:child_process')
+            execSync('gh auth status', { stdio: 'pipe' })
+            lines.push('✅ gh CLI authenticated')
+          } catch {
+            lines.push('❌ gh CLI not authenticated — run: gh auth login')
+          }
+          // Check tunnel
+          const tunnelUrl = getCurrentTunnelUrl()
+          if (tunnelUrl) {
+            lines.push(`✅ Tunnel active: ${tunnelUrl}`)
+          } else {
+            lines.push('❌ Tunnel not active')
+          }
+          // Check watchers
+          const watchers = await watcherStore.list()
+          lines.push(`📊 Watchers: ${watchers.length}`)
+          return { type: 'text', text: lines.join('\n') }
+        }
+
+        case 'webhook-redeploy': {
+          const tunnelUrl = getCurrentTunnelUrl()
+          if (!tunnelUrl) return { type: 'error', message: 'Tunnel not active' }
+          await registerWebhooksForAll(watcherStore, tunnelUrl, ctx.log)
+          return { type: 'text', text: 'Webhooks re-deployed to all watchers' }
+        }
+
+        default:
+          return {
+            type: 'error',
+            message: `Unknown subcommand: ${sub}. Try: list, show, add, remove, downstream, status, queue, logs, retry, doctor, webhook-redeploy`,
+          }
+      }
+    },
+  })
+}

@@ -25,6 +25,7 @@
   },
   "devDependencies": {
     "@openacp/plugin-sdk": "2026.420.1",
+    "@types/node": "^25.6.0",
     "typescript": "^5.4.0",
     "vitest": "^3.0.0"
   },
