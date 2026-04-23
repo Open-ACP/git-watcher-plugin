@@ -11,7 +11,7 @@ export async function bootRecovery(
   watcherStore: WatcherStore,
   queueStore: QueueStore,
   workerPool: PairWorkerPool,
-  log: { info: (msg: string, ctx?: unknown) => void; warn: (msg: string, ctx?: unknown) => void },
+  log: { info: (ctx: unknown, msg?: string) => void; warn: (ctx: unknown, msg?: string) => void },
 ): Promise<void> {
   const watchers = await watcherStore.list()
 

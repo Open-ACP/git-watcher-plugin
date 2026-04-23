@@ -69,9 +69,9 @@ function isMergedPR(payload: Record<string, unknown>): boolean {
  */
 export function createWebhookRoutes(
   log: {
-    info: (msg: string, ctx?: unknown) => void
-    warn: (msg: string, ctx?: unknown) => void
-    error: (msg: string, ctx?: unknown) => void
+    info: (ctx: unknown, msg?: string) => void
+    warn: (ctx: unknown, msg?: string) => void
+    error: (ctx: unknown, msg?: string) => void
   },
 ): FastifyPluginAsync {
   return async (fastify) => {
@@ -94,10 +94,10 @@ export function createWebhookRoutes(
       try {
         fastify.addContentTypeParser(ct, { parseAs: 'buffer' }, rawPassthrough)
       } catch (err) {
-        log.warn('git-watcher: failed to register raw-body parser', {
+        log.warn({
           contentType: ct,
           error: err instanceof Error ? err.message : String(err),
-        })
+        }, 'git-watcher: failed to register raw-body parser')
       }
     }
 
@@ -113,7 +113,7 @@ export function createWebhookRoutes(
           return await handler(req, reply)
         } catch (err) {
           const errObj = err instanceof Error ? err : new Error(String(err))
-          log.error('git-watcher: webhook handler threw', {
+          log.error({
             watcherId: req.params.watcherId,
             deliveryId: req.headers['x-github-delivery'],
             event: req.headers['x-github-event'],
@@ -121,7 +121,7 @@ export function createWebhookRoutes(
             stack: errObj.stack,
             bodyType: typeof req.body,
             bodyIsBuffer: Buffer.isBuffer(req.body),
-          })
+          }, 'git-watcher: webhook handler threw')
           return reply.status(500).send({ error: 'Internal error — see dev log' })
         }
       },
@@ -135,9 +135,9 @@ export function buildWebhookHandler(
   queueStore: QueueStore,
   onNewJob: (watcherId: string, downstreamId: string) => void,
   log: {
-    info: (msg: string, ctx?: unknown) => void
-    warn: (msg: string, ctx?: unknown) => void
-    error: (msg: string, ctx?: unknown) => void
+    info: (ctx: unknown, msg?: string) => void
+    warn: (ctx: unknown, msg?: string) => void
+    error: (ctx: unknown, msg?: string) => void
   },
 ): WebhookHandlerFn {
   const cache = makeDeliveryCache()
@@ -152,9 +152,9 @@ async function handleWebhook(
   onNewJob: (watcherId: string, downstreamId: string) => void,
   cache: DeliveryCache,
   log: {
-    info: (msg: string, ctx?: unknown) => void
-    warn: (msg: string, ctx?: unknown) => void
-    error: (msg: string, ctx?: unknown) => void
+    info: (ctx: unknown, msg?: string) => void
+    warn: (ctx: unknown, msg?: string) => void
+    error: (ctx: unknown, msg?: string) => void
   },
 ): Promise<FastifyReply> {
   const { watcherId } = req.params
@@ -162,7 +162,7 @@ async function handleWebhook(
   const event = req.headers['x-github-event'] as string | undefined
   const signature = req.headers['x-hub-signature-256'] as string | undefined
 
-  log.info('git-watcher: webhook received', {
+  log.info({
     watcherId,
     deliveryId,
     event,
@@ -170,22 +170,22 @@ async function handleWebhook(
     ip: req.ip,
     bodyType: typeof req.body,
     bodyIsBuffer: Buffer.isBuffer(req.body),
-  })
+  }, 'git-watcher: webhook received')
 
   if (!deliveryId || !event || !signature) {
-    log.warn('git-watcher: webhook rejected — missing headers', { watcherId, deliveryId, event, hasSignature: Boolean(signature) })
+    log.warn({ watcherId, deliveryId, event, hasSignature: Boolean(signature) }, 'git-watcher: webhook rejected — missing headers')
     return reply.status(400).send({ error: 'Missing required GitHub webhook headers' })
   }
 
   // Dedup check
   if (cache.has(deliveryId)) {
-    log.info('git-watcher: webhook duplicate — already processed', { watcherId, deliveryId })
+    log.info({ watcherId, deliveryId }, 'git-watcher: webhook duplicate — already processed')
     return reply.status(200).send({ status: 'duplicate' })
   }
 
   const watcher = await watcherStore.get(watcherId)
   if (!watcher) {
-    log.warn('git-watcher: webhook rejected — watcher not found', { watcherId })
+    log.warn({ watcherId }, 'git-watcher: webhook rejected — watcher not found')
     return reply.status(404).send({ error: 'Watcher not found' })
   }
 
@@ -197,22 +197,22 @@ async function handleWebhook(
   } else if (typeof req.body === 'string') {
     rawBody = Buffer.from(req.body)
   } else {
-    log.warn('git-watcher: body was pre-parsed (HMAC will fail) — raw parser not active', {
+    log.warn({
       watcherId,
       bodyType: typeof req.body,
-    })
+    }, 'git-watcher: body was pre-parsed (HMAC will fail) — raw parser not active')
     rawBody = Buffer.from(JSON.stringify(req.body))
   }
 
   if (!verifySignature(watcher.upstream.webhookSecret, rawBody, signature)) {
-    log.warn('git-watcher: webhook rejected — invalid signature', { watcherId, deliveryId })
+    log.warn({ watcherId, deliveryId }, 'git-watcher: webhook rejected — invalid signature')
     return reply.status(401).send({ error: 'Invalid signature' })
   }
 
   cache.add(deliveryId)
 
   if (event !== 'pull_request') {
-    log.info('git-watcher: webhook ignored — non-PR event', { watcherId, event })
+    log.info({ watcherId, event }, 'git-watcher: webhook ignored — non-PR event')
     return reply.status(200).send({ status: 'ignored' })
   }
 
@@ -224,7 +224,7 @@ async function handleWebhook(
     const parsed = new URLSearchParams(rawBody.toString())
     const encoded = parsed.get('payload')
     if (!encoded) {
-      log.warn('git-watcher: form-urlencoded body missing "payload" field', { watcherId })
+      log.warn({ watcherId }, 'git-watcher: form-urlencoded body missing "payload" field')
       return reply.status(400).send({ error: 'Missing payload field' })
     }
     payloadJson = encoded
@@ -237,12 +237,12 @@ async function handleWebhook(
   const prNumberEarly = pr?.number as number | undefined
 
   if (!isMergedPR(payload)) {
-    log.info('git-watcher: webhook ignored — PR not merged', {
+    log.info({
       watcherId,
       action,
       prNumber: prNumberEarly,
       merged: pr?.merged,
-    })
+    }, 'git-watcher: webhook ignored — PR not merged')
     return reply.status(200).send({ status: 'ignored' })
   }
 
@@ -254,12 +254,12 @@ async function handleWebhook(
   )
 
   if (matchingDownstreams.length === 0) {
-    log.info('git-watcher: webhook ignored — no matching downstreams for branch', {
+    log.info({
       watcherId,
       prBranch,
       upstreamBranch: watcher.upstream.branch,
       downstreamBranches: watcher.downstreams.map((d) => d.branch),
-    })
+    }, 'git-watcher: webhook ignored — no matching downstreams for branch')
     return reply.status(200).send({ status: 'no_matching_downstreams' })
   }
 
@@ -285,13 +285,13 @@ async function handleWebhook(
     jobIds.push(jobId)
   }
 
-  log.info('git-watcher: webhook triggered — jobs enqueued', {
+  log.info({
     watcherId,
     prNumber,
     prUrl,
     count: matchingDownstreams.length,
     jobIds,
-  })
+  }, 'git-watcher: webhook triggered — jobs enqueued')
 
   return reply.status(200).send({ status: 'queued', count: matchingDownstreams.length })
 }

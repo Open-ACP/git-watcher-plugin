@@ -67,6 +67,12 @@ const plugin: OpenACPPlugin = {
       return
     }
 
+    // Pino runtime accepts (obj, msg) even though the SDK type only declares (msg, ...args).
+    // Cast at the boundary so helper modules can use the richer obj-first form.
+    type PinoFn = (ctx: unknown, msg?: string) => void
+    type PinoLog = { info: PinoFn; warn: PinoFn; error: PinoFn }
+    const pinoLog = ctx.log as unknown as PinoLog
+
     // --- Initialize shared state ---
     const watcherStore = new WatcherStore(ctx.storage)
     const queueStore = new QueueStore(ctx.storage)
@@ -138,11 +144,11 @@ const plugin: OpenACPPlugin = {
               const reason = (e.error && typeof e.error === 'object' && 'message' in e.error)
                 ? String((e.error as { message: unknown }).message)
                 : JSON.stringify(e.error)
-              ctx.log.error('git-watcher: agent event error', { sessionId, reason, outputTail: output.slice(-300) })
+              pinoLog.error({ sessionId, reason, outputTail: output.slice(-300) }, 'git-watcher: agent event error')
               reject(new Error(`Agent error: ${reason}`))
             } else {
               if (e.stopReason && e.stopReason !== 'end_turn') {
-                ctx.log.warn('git-watcher: agent stopped unexpectedly', { sessionId, stopReason: e.stopReason })
+                pinoLog.warn({ sessionId, stopReason: e.stopReason }, 'git-watcher: agent stopped unexpectedly')
               }
               resolve(output)
             }
@@ -151,7 +157,7 @@ const plugin: OpenACPPlugin = {
         session.on('agent_event', handler)
         session.prompt(prompt, undefined, undefined).catch((err: unknown) => {
           const msg = err instanceof Error ? err.message : String(err)
-          ctx.log.error('git-watcher: session.prompt threw', { sessionId, error: msg })
+          pinoLog.error({ sessionId, error: msg }, 'git-watcher: session.prompt threw')
           reject(err instanceof Error ? err : new Error(msg))
         })
       })
@@ -165,7 +171,7 @@ const plugin: OpenACPPlugin = {
       workspaceSync,
       createSession: createSessionFn,
       promptSession: promptSessionFn,
-      log: ctx.log,
+      log: pinoLog,
       autoApprovedCommands: [...AUTO_APPROVED_COMMANDS],
     })
 
@@ -179,12 +185,12 @@ const plugin: OpenACPPlugin = {
     } else {
       // Register the route once (no-op on hot-reload, but that's OK — the route
       // delegates to whatever handler is currently stored in the global registry).
-      apiServer.registerPlugin('/', createWebhookRoutes(ctx.log), { auth: false })
+      apiServer.registerPlugin('/', createWebhookRoutes(pinoLog), { auth: false })
       // Always install/refresh the handler with the current plugin instance's state.
       setWebhookHandler(
         buildWebhookHandler(watcherStore, queueStore, (watcherId, downId) => {
           workerPool.notify(watcherId, downId)
-        }, ctx.log),
+        }, pinoLog),
       )
       ctx.log.info('git-watcher: webhook handler registered')
     }
@@ -194,11 +200,11 @@ const plugin: OpenACPPlugin = {
     ctx.on('tunnel:started', async (data: unknown) => {
       const url = (data as { url: string }).url
       ctx.log.info(`git-watcher: tunnel started at ${url}`)
-      await registerWebhooksForAll(watcherStore, url, ctx.log)
+      await registerWebhooksForAll(watcherStore, url, pinoLog)
     })
 
     // --- Boot recovery: reset interrupted jobs and drain pending queues ---
-    await bootRecovery(watcherStore, queueStore, workerPool, ctx.log)
+    await bootRecovery(watcherStore, queueStore, workerPool, pinoLog)
 
     // --- Commands ---
     registerCommands(ctx, watcherStore, queueStore, runLogStore, workerPool, {

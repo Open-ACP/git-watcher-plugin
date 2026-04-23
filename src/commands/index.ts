@@ -337,7 +337,12 @@ export function registerCommands(
         case 'webhook-redeploy': {
           const tunnelUrl = getCurrentTunnelUrl()
           if (!tunnelUrl) return { type: 'error', message: 'Tunnel not active' }
-          await registerWebhooksForAll(watcherStore, tunnelUrl, ctx.log)
+          // Cast ctx.log because SDK Logger type is msg-first but runtime is pino (obj-first)
+          await registerWebhooksForAll(
+            watcherStore,
+            tunnelUrl,
+            ctx.log as unknown as Parameters<typeof registerWebhooksForAll>[2],
+          )
           return { type: 'text', text: 'Webhooks re-deployed to all watchers' }
         }
 

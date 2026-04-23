@@ -7,7 +7,7 @@ import type { WatcherStore } from '../storage/watcher-store.js'
 export async function registerWebhooksForAll(
   watcherStore: WatcherStore,
   tunnelUrl: string,
-  log: { info: (msg: string, ctx?: unknown) => void; warn: (msg: string, ctx?: unknown) => void; error: (msg: string, ctx?: unknown) => void },
+  log: { info: (ctx: unknown, msg?: string) => void; warn: (ctx: unknown, msg?: string) => void; error: (ctx: unknown, msg?: string) => void },
 ): Promise<void> {
   const watchers = await watcherStore.list()
   if (watchers.length === 0) return
@@ -26,12 +26,12 @@ export async function registerWebhooksForAll(
           `gh api repos/${repo}/hooks/${hookId} -X PATCH -f "config[url]=${webhookUrl}"`,
           { stdio: 'pipe' },
         )
-        log.info(`Re-registered webhook for ${repo}`, { hookId, webhookUrl })
+        log.info({ hookId, webhookUrl }, `Re-registered webhook for ${repo}`)
       }
     } catch (err) {
-      log.warn(`Failed to re-register webhook for ${watcher.upstream.repo}`, {
+      log.warn({
         err: err instanceof Error ? err.message : String(err),
-      })
+      }, `Failed to re-register webhook for ${watcher.upstream.repo}`)
     }
   }
 }

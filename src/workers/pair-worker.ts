@@ -27,9 +27,9 @@ export interface PairWorkerDeps {
   promptSession: (sessionId: string, prompt: string) => Promise<string>
   destroySession?: (sessionId: string) => Promise<void>
   log: {
-    info: (msg: string, ctx?: unknown) => void
-    warn: (msg: string, ctx?: unknown) => void
-    error: (msg: string, ctx?: unknown) => void
+    info: (ctx: unknown, msg?: string) => void
+    warn: (ctx: unknown, msg?: string) => void
+    error: (ctx: unknown, msg?: string) => void
   }
   autoApprovedCommands: string[]
 }
@@ -121,16 +121,16 @@ export class PairWorker {
       attempts: job.attempts,
     }
 
-    this.deps.log.info(`git-watcher: processing job`, jobCtx)
+    this.deps.log.info(jobCtx, `git-watcher: processing job`)
 
     try {
       // Sync workspace
       step = 'sync-workspace'
-      this.deps.log.info(`git-watcher: syncing workspace`, {
+      this.deps.log.info({
         ...jobCtx,
         upstream: `${watcher.upstream.repo}@${watcher.upstream.branch}`,
         downstream: `${downstream.repo}@${downstream.branch}`,
-      })
+      }, `git-watcher: syncing workspace`)
       const { workspaceDir } = await workspaceSync.sync({
         watcherId: this.watcherId,
         downstreamId: this.downstreamId,
@@ -139,16 +139,16 @@ export class PairWorker {
         downstreamRepo: downstream.repo,
         downstreamBranch: downstream.branch,
       })
-      this.deps.log.info(`git-watcher: workspace ready`, { ...jobCtx, workspaceDir })
+      this.deps.log.info({ ...jobCtx, workspaceDir }, `git-watcher: workspace ready`)
 
       // Resolve session (reuse or create)
       step = 'create-session'
       const resolved = resolveSession(downstream)
       if (resolved.reuseExisting && resolved.sessionId) {
         sessionId = resolved.sessionId
-        this.deps.log.info(`git-watcher: reusing session`, { ...jobCtx, sessionId })
+        this.deps.log.info({ ...jobCtx, sessionId }, `git-watcher: reusing session`)
       } else {
-        this.deps.log.info(`git-watcher: creating session`, { ...jobCtx, agent: downstream.agent })
+        this.deps.log.info({ ...jobCtx, agent: downstream.agent }, `git-watcher: creating session`)
         const created = await this.deps.createSession({
           channelId: `git-watcher:${this.watcherId}:${this.downstreamId}`,
           agentName: downstream.agent,
@@ -157,7 +157,7 @@ export class PairWorker {
           threadTitle: `git-watcher: ${downstream.repo} #${job.prNumber}`,
         })
         sessionId = created.sessionId
-        this.deps.log.info(`git-watcher: session created`, { ...jobCtx, sessionId })
+        this.deps.log.info({ ...jobCtx, sessionId }, `git-watcher: session created`)
 
         // Update downstream session tracking
         downstream.currentSessionId = sessionId
@@ -179,9 +179,9 @@ export class PairWorker {
 
       // Send prompt and collect output
       step = 'prompt-session'
-      this.deps.log.info(`git-watcher: sending prompt`, { ...jobCtx, sessionId, promptLength: prompt.length })
+      this.deps.log.info({ ...jobCtx, sessionId, promptLength: prompt.length }, `git-watcher: sending prompt`)
       const output = await this.deps.promptSession(sessionId, prompt)
-      this.deps.log.info(`git-watcher: prompt completed`, { ...jobCtx, sessionId, outputLength: output.length })
+      this.deps.log.info({ ...jobCtx, sessionId, outputLength: output.length }, `git-watcher: prompt completed`)
 
       // Increment turn count for rolling strategy
       step = 'finalize'
@@ -192,10 +192,10 @@ export class PairWorker {
       const parsed = parseIssueUrl(output)
       const issueUrl = parsed?.url
       if (!issueUrl) {
-        this.deps.log.warn(`git-watcher: no ISSUE_CREATED/ISSUE_EXISTS line in agent output — tail`, {
+        this.deps.log.warn({
           ...jobCtx,
           tail: output.slice(-500),
-        })
+        }, `git-watcher: no ISSUE_CREATED/ISSUE_EXISTS line in agent output — tail`)
       }
 
       // Mark job done
@@ -218,17 +218,17 @@ export class PairWorker {
         issueUrl,
       })
 
-      this.deps.log.info(`Job ${job.id} completed`, { issueUrl })
+      this.deps.log.info({ issueUrl }, `Job ${job.id} completed`)
     } catch (err) {
       const errObj = err instanceof Error ? err : new Error(String(err))
       const error = `[${step}] ${errObj.message}`
-      this.deps.log.error(`git-watcher: job failed`, {
+      this.deps.log.error({
         ...jobCtx,
         step,
         sessionId,
         error: errObj.message,
         stack: errObj.stack,
-      })
+      }, `git-watcher: job failed`)
 
       if (job.attempts >= MAX_ATTEMPTS) {
         job.status = 'failed'
