@@ -168,6 +168,9 @@ export function registerCommands(
               }
             }
 
+            const config = ctx.config as { get: () => { defaultAgent?: string } }
+            const configuredDefault = config.get().defaultAgent
+
             let agent: string
             if (agentArg) {
               if (!installed.includes(agentArg)) {
@@ -177,6 +180,8 @@ export function registerCommands(
                 }
               }
               agent = agentArg
+            } else if (configuredDefault && installed.includes(configuredDefault)) {
+              agent = configuredDefault
             } else {
               agent = installed[0]
             }
