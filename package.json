@@ -27,5 +27,8 @@
     "@openacp/plugin-sdk": "2026.420.1",
     "typescript": "^5.4.0",
     "vitest": "^3.0.0"
+  },
+  "dependencies": {
+    "nanoid": "^5.1.9"
   }
 }
