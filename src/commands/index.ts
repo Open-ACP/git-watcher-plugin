@@ -28,8 +28,32 @@ export function registerCommands(
       const sub = parts[0] ?? 'list'
 
       switch (sub) {
-        case 'list':
         case '': {
+          return {
+            type: 'menu',
+            title: [
+              'git-watcher — watch upstream repos for PR merges and trigger AI analysis.',
+              '',
+              'Commands needing arguments (type manually):',
+              '  /gitwatch add <repo> <branch>',
+              '  /gitwatch show <watcherId>',
+              '  /gitwatch downstream add <watcherId> <repo> <branch>',
+              '  /gitwatch downstream remove <watcherId> <downstreamId>',
+              '  /gitwatch remove <watcherId>',
+              '  /gitwatch queue <watcherId> <downstreamId>',
+              '  /gitwatch retry <jobId> <watcherId> <downstreamId>',
+              '  /gitwatch logs [watcherId] [downstreamId]',
+            ].join('\n'),
+            options: [
+              { label: '📋 List watchers', command: '/gitwatch list' },
+              { label: '📊 Status', command: '/gitwatch status' },
+              { label: '🩺 Doctor', command: '/gitwatch doctor' },
+              { label: '🔗 Redeploy webhooks', command: '/gitwatch webhook-redeploy' },
+            ],
+          }
+        }
+
+        case 'list': {
           const watchers = await watcherStore.list()
           if (watchers.length === 0) {
             return { type: 'text', text: 'No watchers configured. Use /gitwatch add to create one.' }
