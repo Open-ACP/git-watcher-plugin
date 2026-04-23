@@ -1,8 +1,15 @@
+import { spawnSync } from 'node:child_process'
 import type { WatcherStore } from '../storage/watcher-store.js'
 
 /**
  * Re-registers GitHub webhooks for all watchers when the tunnel URL changes.
  * Called once per tunnel:started event during plugin lifecycle.
+ *
+ * Uses the dedicated config endpoint (`PATCH /repos/{owner}/{repo}/hooks/{id}/config`)
+ * which supports individual-field updates. The main hook PATCH endpoint
+ * replaces the whole `config` object, which would silently drop `secret` and
+ * reset `content_type` to the form default — that caused webhooks to stop
+ * being signed and to arrive as application/x-www-form-urlencoded.
  */
 export async function registerWebhooksForAll(
   watcherStore: WatcherStore,
@@ -14,24 +21,34 @@ export async function registerWebhooksForAll(
 
   for (const watcher of watchers) {
     const webhookUrl = `${tunnelUrl}/git-watcher/webhooks/${watcher.id}`
-    try {
-      // Use gh CLI to update the webhook URL — the AI would normally do this,
-      // but for re-registration we run it directly via exec.
-      const { execSync } = await import('node:child_process')
-      const hookId = watcher.upstream.webhookId
-      const repo = watcher.upstream.repo
+    const hookId = watcher.upstream.webhookId
+    const repo = watcher.upstream.repo
+    if (!hookId) continue
 
-      if (hookId) {
-        execSync(
-          `gh api repos/${repo}/hooks/${hookId} -X PATCH -f "config[url]=${webhookUrl}"`,
-          { stdio: 'pipe' },
-        )
-        log.info({ hookId, webhookUrl }, `Re-registered webhook for ${repo}`)
-      }
-    } catch (err) {
+    // Send full config including the stored secret so it is preserved even
+    // against any API quirk that might still treat this as a replace.
+    const body = JSON.stringify({
+      url: webhookUrl,
+      content_type: 'json',
+      secret: watcher.upstream.webhookSecret,
+      insecure_ssl: '0',
+    })
+
+    const result = spawnSync(
+      'gh',
+      ['api', `repos/${repo}/hooks/${hookId}/config`, '--method', 'PATCH', '--input', '-'],
+      { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], input: body },
+    )
+
+    if (result.status === 0) {
+      log.info({ hookId, webhookUrl }, `git-watcher: re-registered webhook for ${repo}`)
+    } else {
       log.warn({
-        err: err instanceof Error ? err.message : String(err),
-      }, `Failed to re-register webhook for ${watcher.upstream.repo}`)
+        hookId,
+        repo,
+        stderr: result.stderr?.trim(),
+        stdout: result.stdout?.trim(),
+      }, `git-watcher: failed to re-register webhook for ${repo}`)
     }
   }
 }
