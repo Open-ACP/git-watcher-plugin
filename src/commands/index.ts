@@ -4,9 +4,11 @@ import type { WatcherStore } from '../storage/watcher-store.js'
 import type { QueueStore } from '../storage/queue-store.js'
 import type { RunLog } from '../storage/run-log.js'
 import type { PairWorkerPool } from '../workers/pair-worker.js'
-import type { PluginConfig, Downstream } from '../types.js'
+import type { PluginConfig, Downstream, Watcher } from '../types.js'
 import { DEFAULT_PROMPT_TEMPLATE } from '../types.js'
 import { registerWebhooksForAll } from '../hooks/tunnel-listener.js'
+import { createGithubWebhook, deleteGithubWebhook } from '../hooks/github-webhook.js'
+import { parseRepoInput } from '../utils/parse-repo.js'
 
 export function registerCommands(
   ctx: PluginContext,
@@ -20,7 +22,7 @@ export function registerCommands(
   // /gitwatch <subcommand> — single entry-point command covering all git-watcher operations
   ctx.registerCommand({
     name: 'gitwatch',
-    description: 'git-watcher: list, add, remove, show, status, queue, logs, test, retry, doctor',
+    description: 'git-watcher: add, list, show, remove, downstream, status, queue, logs, retry, test, doctor, webhook-redeploy',
     usage: '<subcommand> [args]',
     category: 'plugin',
     handler: async (args) => {
@@ -35,14 +37,17 @@ export function registerCommands(
               'git-watcher — watch upstream repos for PR merges and trigger AI analysis.',
               '',
               'Commands needing arguments (type manually):',
-              '  /gitwatch add <repo> <branch>',
+              '  /gitwatch add <repo-or-url> [branch]',
               '  /gitwatch show <watcherId>',
-              '  /gitwatch downstream add <watcherId> <repo> <branch>',
+              '  /gitwatch downstream add <watcherId> <repo-or-url> [branch]',
               '  /gitwatch downstream remove <watcherId> <downstreamId>',
               '  /gitwatch remove <watcherId>',
               '  /gitwatch queue <watcherId> <downstreamId>',
               '  /gitwatch retry <jobId> <watcherId> <downstreamId>',
               '  /gitwatch logs [watcherId] [downstreamId]',
+              '  /gitwatch test <watcherId> <prNumber>',
+              '',
+              'Repo accepts owner/repo or https://github.com/owner/repo.',
             ].join('\n'),
             options: [
               { label: '📋 List watchers', command: '/gitwatch list' },
@@ -82,15 +87,51 @@ export function registerCommands(
         }
 
         case 'add': {
+          const repoArg = parts[1]
+          const branch = parts[2] ?? 'main'
+          if (!repoArg) {
+            return { type: 'error', message: 'Usage: /gitwatch add <repo-or-url> [branch]' }
+          }
+          const repo = parseRepoInput(repoArg)
+          if (!repo) {
+            return { type: 'error', message: `Invalid repo: "${repoArg}". Use owner/repo or a GitHub URL.` }
+          }
+
           const tunnelUrl = getCurrentTunnelUrl()
-          if (!tunnelUrl) return { type: 'error', message: 'Tunnel not active. Wait for tunnel to start.' }
+          if (!tunnelUrl) return { type: 'error', message: 'Tunnel not active. Wait for tunnel to start, then retry.' }
+
+          const watcherId = `watcher_${nanoid(8)}`
+          const webhookUrl = `${tunnelUrl}/git-watcher/webhooks/${watcherId}`
+
+          let hookId: number
+          let secret: string
+          try {
+            const created = createGithubWebhook({ repo, webhookUrl })
+            hookId = created.hookId
+            secret = created.secret
+          } catch (err) {
+            return {
+              type: 'error',
+              message: `Failed to register GitHub webhook: ${(err as Error).message}`,
+            }
+          }
+
+          const watcher: Watcher = {
+            id: watcherId,
+            upstream: { repo, branch, webhookId: hookId, webhookSecret: secret },
+            downstreams: [],
+            createdAt: new Date().toISOString(),
+          }
+          await watcherStore.save(watcher)
 
           return {
             type: 'text',
-            text: 'Use the interactive wizard: /gitwatch add is a multi-step process.\n\n' +
-              'For now, use the following steps:\n' +
-              '1. Create a watcher with /gitwatch add <upstream-repo> <branch>\n' +
-              '2. Add downstreams with /gitwatch downstream add <watcherId> <downstream-repo> <branch>',
+            text:
+              `✅ Watcher created: **${watcherId}**\n` +
+              `Upstream: \`${repo}\` @ \`${branch}\`\n` +
+              `Webhook: #${hookId} → ${webhookUrl}\n\n` +
+              `Next: add a downstream with\n` +
+              `/gitwatch downstream add ${watcherId} <repo-or-url> [branch]`,
           }
         }
 
@@ -99,11 +140,15 @@ export function registerCommands(
 
           if (dsub === 'add') {
             const watcherId = parts[2]
-            const repo = parts[3]
+            const repoArg = parts[3]
             const branch = parts[4] ?? 'main'
 
-            if (!watcherId || !repo) {
-              return { type: 'error', message: 'Usage: /gitwatch downstream add <watcherId> <repo> <branch>' }
+            if (!watcherId || !repoArg) {
+              return { type: 'error', message: 'Usage: /gitwatch downstream add <watcherId> <repo-or-url> [branch]' }
+            }
+            const repo = parseRepoInput(repoArg)
+            if (!repo) {
+              return { type: 'error', message: `Invalid repo: "${repoArg}". Use owner/repo or a GitHub URL.` }
             }
             const watcher = await watcherStore.get(watcherId)
             if (!watcher) return { type: 'error', message: `Watcher "${watcherId}" not found` }
@@ -147,8 +192,60 @@ export function registerCommands(
         case 'remove': {
           const watcherId = parts[1]
           if (!watcherId) return { type: 'error', message: 'Usage: /gitwatch remove <watcherId>' }
+          const watcher = await watcherStore.get(watcherId)
+          if (!watcher) return { type: 'error', message: `Watcher "${watcherId}" not found` }
+
+          let webhookNote = ''
+          if (watcher.upstream.webhookId) {
+            const res = deleteGithubWebhook(watcher.upstream.repo, watcher.upstream.webhookId)
+            webhookNote = res.ok
+              ? ` (GitHub webhook #${watcher.upstream.webhookId} deleted)`
+              : ` (⚠️ failed to delete GitHub webhook: ${res.error})`
+          }
+
           await watcherStore.delete(watcherId)
-          return { type: 'text', text: `Removed watcher ${watcherId}` }
+          for (const d of watcher.downstreams) {
+            workerPool.delete(watcherId, d.id)
+          }
+          return { type: 'text', text: `Removed watcher ${watcherId}${webhookNote}` }
+        }
+
+        case 'test': {
+          const watcherId = parts[1]
+          const prNumberStr = parts[2]
+          if (!watcherId || !prNumberStr) {
+            return { type: 'error', message: 'Usage: /gitwatch test <watcherId> <prNumber>' }
+          }
+          const prNumber = parseInt(prNumberStr, 10)
+          if (isNaN(prNumber)) return { type: 'error', message: 'prNumber must be an integer' }
+
+          const watcher = await watcherStore.get(watcherId)
+          if (!watcher) return { type: 'error', message: `Watcher "${watcherId}" not found` }
+          if (watcher.downstreams.length === 0) {
+            return { type: 'error', message: 'Watcher has no downstreams. Add one first.' }
+          }
+
+          const prUrl = `https://github.com/${watcher.upstream.repo}/pull/${prNumber}`
+          let enqueued = 0
+          for (const d of watcher.downstreams) {
+            await queueStore.enqueue({
+              id: `job_${nanoid(8)}`,
+              watcherId,
+              downstreamId: d.id,
+              prNumber,
+              prUrl,
+              deliveryId: `manual_${nanoid(6)}`,
+              enqueuedAt: new Date().toISOString(),
+              status: 'pending',
+              attempts: 0,
+            })
+            workerPool.notify(watcherId, d.id)
+            enqueued++
+          }
+          return {
+            type: 'text',
+            text: `Enqueued ${enqueued} job(s) for PR #${prNumber} on ${watcher.upstream.repo}`,
+          }
         }
 
         case 'status': {
@@ -247,7 +344,7 @@ export function registerCommands(
         default:
           return {
             type: 'error',
-            message: `Unknown subcommand: ${sub}. Try: list, show, add, remove, downstream, status, queue, logs, retry, doctor, webhook-redeploy`,
+            message: `Unknown subcommand: ${sub}. Try: list, show, add, remove, downstream, status, queue, logs, retry, test, doctor, webhook-redeploy`,
           }
       }
     },
