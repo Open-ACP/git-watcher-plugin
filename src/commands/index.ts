@@ -39,7 +39,7 @@ export function registerCommands(
               'Commands needing arguments (type manually):',
               '  /gitwatch add <repo-or-url> [branch]',
               '  /gitwatch show <watcherId>',
-              '  /gitwatch downstream add <watcherId> <repo-or-url> [branch]',
+              '  /gitwatch downstream add <watcherId> <repo-or-url> [branch] [agent]',
               '  /gitwatch downstream remove <watcherId> <downstreamId>',
               '  /gitwatch remove <watcherId>',
               '  /gitwatch queue <watcherId> <downstreamId>',
@@ -142,9 +142,13 @@ export function registerCommands(
             const watcherId = parts[2]
             const repoArg = parts[3]
             const branch = parts[4] ?? 'main'
+            const agentArg = parts[5]
 
             if (!watcherId || !repoArg) {
-              return { type: 'error', message: 'Usage: /gitwatch downstream add <watcherId> <repo-or-url> [branch]' }
+              return {
+                type: 'error',
+                message: 'Usage: /gitwatch downstream add <watcherId> <repo-or-url> [branch] [agent]',
+              }
             }
             const repo = parseRepoInput(repoArg)
             if (!repo) {
@@ -152,6 +156,30 @@ export function registerCommands(
             }
             const watcher = await watcherStore.get(watcherId)
             if (!watcher) return { type: 'error', message: `Watcher "${watcherId}" not found` }
+
+            const core = ctx.core as {
+              agentManager: { getAvailableAgents: () => Array<{ name: string }> }
+            }
+            const installed = core.agentManager.getAvailableAgents().map((a) => a.name)
+            if (installed.length === 0) {
+              return {
+                type: 'error',
+                message: 'No agents installed. Run: openacp agents install <name>',
+              }
+            }
+
+            let agent: string
+            if (agentArg) {
+              if (!installed.includes(agentArg)) {
+                return {
+                  type: 'error',
+                  message: `Agent "${agentArg}" not installed. Installed: ${installed.join(', ')}`,
+                }
+              }
+              agent = agentArg
+            } else {
+              agent = installed[0]
+            }
 
             const downstreamId = `down_${nanoid(6)}`
             const downstream: Downstream = {
@@ -161,14 +189,17 @@ export function registerCommands(
               telegramTopicId: 0,
               issueLabels: ['sync'],
               promptTemplate: DEFAULT_PROMPT_TEMPLATE,
-              agent: 'claude-opus-4-7',
+              agent,
               sessionStrategy: 'per-trigger',
               sessionLimits: { maxTurns: 10, maxAge: '24h' },
             }
             watcher.downstreams.push(downstream)
             await watcherStore.save(watcher)
             await queueStore.addPairToIndex(watcherId, downstreamId)
-            return { type: 'text', text: `Added downstream ${downstreamId}: \`${repo}\` @ \`${branch}\`` }
+            return {
+              type: 'text',
+              text: `Added downstream ${downstreamId}: \`${repo}\` @ \`${branch}\` using agent \`${agent}\``,
+            }
           }
 
           if (dsub === 'remove') {
