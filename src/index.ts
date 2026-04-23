@@ -99,8 +99,13 @@ const plugin: OpenACPPlugin = {
         autoApprovedCommands?: string[]
       }) => Promise<{ id: string }>
     }
+    interface LiveSession {
+      on: (event: string, handler: (e: unknown) => void) => void
+      off: (event: string, handler: (e: unknown) => void) => void
+      enqueuePrompt: (text: string) => Promise<string>
+    }
     const sessionManager = ctx.sessions as unknown as {
-      getSession: (id: string) => { on: (event: string, handler: (e: unknown) => void) => void; prompt: (text: string, a: undefined, b: undefined) => Promise<void> } | undefined
+      getSession: (id: string) => LiveSession | undefined
     }
 
     const createSessionFn = async (opts: {
@@ -128,39 +133,40 @@ const plugin: OpenACPPlugin = {
       }
     }
 
-    // Sends a prompt to an existing session and accumulates text output until
-    // the agent emits a 'result' or 'error' event.
+    // Sends a prompt and waits for the turn to finish. `enqueuePrompt` awaits the
+    // PromptQueue processor, which in turn awaits the agent — so it resolves when
+    // the turn completes. Meanwhile we buffer `text` events into a single string.
     const promptSessionFn = async (sessionId: string, prompt: string): Promise<string> => {
       const session = sessionManager.getSession(sessionId)
       if (!session) throw new Error(`Session ${sessionId} not found in SessionManager`)
 
-      return new Promise<string>((resolve, reject) => {
-        let output = ''
-        const handler = (event: unknown) => {
-          const e = event as { type: string; text?: string; error?: unknown; stopReason?: string }
-          if (e.type === 'text_delta' && e.text) output += e.text
-          if (e.type === 'result' || e.type === 'error') {
-            if (e.type === 'error') {
-              const reason = (e.error && typeof e.error === 'object' && 'message' in e.error)
-                ? String((e.error as { message: unknown }).message)
-                : JSON.stringify(e.error)
-              pinoLog.error({ sessionId, reason, outputTail: output.slice(-300) }, 'git-watcher: agent event error')
-              reject(new Error(`Agent error: ${reason}`))
-            } else {
-              if (e.stopReason && e.stopReason !== 'end_turn') {
-                pinoLog.warn({ sessionId, stopReason: e.stopReason }, 'git-watcher: agent stopped unexpectedly')
-              }
-              resolve(output)
-            }
-          }
+      let output = ''
+      let agentError: string | null = null
+      const handler = (event: unknown) => {
+        const e = event as { type: string; content?: string; message?: string }
+        if (e.type === 'text' && typeof e.content === 'string') {
+          output += e.content
+        } else if (e.type === 'error' && typeof e.message === 'string') {
+          agentError = e.message
         }
-        session.on('agent_event', handler)
-        session.prompt(prompt, undefined, undefined).catch((err: unknown) => {
-          const msg = err instanceof Error ? err.message : String(err)
-          pinoLog.error({ sessionId, error: msg }, 'git-watcher: session.prompt threw')
-          reject(err instanceof Error ? err : new Error(msg))
-        })
-      })
+      }
+      session.on('agent_event', handler)
+
+      try {
+        await session.enqueuePrompt(prompt)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        pinoLog.error({ sessionId, error: msg }, 'git-watcher: enqueuePrompt threw')
+        throw err instanceof Error ? err : new Error(msg)
+      } finally {
+        session.off('agent_event', handler)
+      }
+
+      if (agentError) {
+        pinoLog.error({ sessionId, agentError, outputTail: output.slice(-300) }, 'git-watcher: agent emitted error event')
+        throw new Error(`Agent error: ${agentError}`)
+      }
+      return output
     }
 
     // --- Worker pool ---
