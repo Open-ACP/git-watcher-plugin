@@ -172,9 +172,15 @@ async function handleWebhook(
     bodyIsBuffer: Buffer.isBuffer(req.body),
   }, 'git-watcher: webhook received')
 
-  if (!deliveryId || !event || !signature) {
-    log.warn({ watcherId, deliveryId, event, hasSignature: Boolean(signature) }, 'git-watcher: webhook rejected — missing headers')
-    return reply.status(400).send({ error: 'Missing required GitHub webhook headers' })
+  if (!deliveryId || !event) {
+    log.warn({ watcherId, deliveryId, event }, 'git-watcher: webhook rejected — not a GitHub delivery')
+    return reply.status(400).send({ error: 'Missing X-GitHub-Delivery or X-GitHub-Event' })
+  }
+  if (!signature) {
+    log.warn({ watcherId, deliveryId, event }, 'git-watcher: webhook rejected — no signature (webhook was created without a secret)')
+    return reply.status(400).send({
+      error: 'Missing X-Hub-Signature-256. Webhook has no secret. Recreate: /gitwatch remove <id> then /gitwatch add',
+    })
   }
 
   // Dedup check
