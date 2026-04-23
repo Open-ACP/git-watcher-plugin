@@ -22,16 +22,39 @@ export function fillTemplate(template: string, vars: TemplateVars): string {
     .replace(/\{issue_labels\}/g, vars.issue_labels)
 }
 
+export type OutcomeKind = 'created' | 'exists' | 'skipped' | 'error'
+export interface Outcome {
+  kind: OutcomeKind
+  /** URL for created/exists, free-form reason for skipped/error. */
+  value: string
+}
+
 /**
- * Parse the AI output to find ISSUE_CREATED or ISSUE_EXISTS lines.
- * Returns the issue URL if found, or null.
+ * Parse the AI output for a terminal outcome line. The last matching line wins
+ * (the agent may emit intermediate noise before the real verdict).
  */
-export function parseIssueUrl(output: string): { status: 'created' | 'exists'; url: string } | null {
+export function parseOutcome(output: string): Outcome | null {
+  let last: Outcome | null = null
   for (const line of output.split('\n')) {
-    const created = line.match(/^ISSUE_CREATED:\s*(https?:\/\/\S+)/)
-    if (created) return { status: 'created', url: created[1] }
-    const exists = line.match(/^ISSUE_EXISTS:\s*(https?:\/\/\S+)/)
-    if (exists) return { status: 'exists', url: exists[1] }
+    const trimmed = line.trim()
+    const created = trimmed.match(/^ISSUE_CREATED:\s*(\S+)/)
+    if (created) { last = { kind: 'created', value: created[1] }; continue }
+    const exists = trimmed.match(/^ISSUE_EXISTS:\s*(\S+)/)
+    if (exists) { last = { kind: 'exists', value: exists[1] }; continue }
+    const skipped = trimmed.match(/^ISSUE_SKIPPED:\s*(.+)/)
+    if (skipped) { last = { kind: 'skipped', value: skipped[1] }; continue }
+    const err = trimmed.match(/^ERROR:\s*(.+)/)
+    if (err) { last = { kind: 'error', value: err[1] }; continue }
+  }
+  return last
+}
+
+/** @deprecated — kept for backward compat; returns null for skipped/error. */
+export function parseIssueUrl(output: string): { status: 'created' | 'exists'; url: string } | null {
+  const outcome = parseOutcome(output)
+  if (!outcome) return null
+  if (outcome.kind === 'created' || outcome.kind === 'exists') {
+    return { status: outcome.kind, url: outcome.value }
   }
   return null
 }

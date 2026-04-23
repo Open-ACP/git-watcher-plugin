@@ -46,6 +46,7 @@ export function registerCommands(
               '  /gitwatch retry <jobId> <watcherId> <downstreamId>',
               '  /gitwatch logs [watcherId] [downstreamId]',
               '  /gitwatch test <watcherId> <prNumber>',
+              '  /gitwatch template <watcherId> <downstreamId> [new template | reset]',
               '',
               'Repo accepts owner/repo or https://github.com/owner/repo.',
             ].join('\n'),
@@ -225,6 +226,55 @@ export function registerCommands(
           return { type: 'error', message: 'Usage: /gitwatch downstream <add|remove> ...' }
         }
 
+        case 'template': {
+          // /gitwatch template <watcherId> <downId>          — show current
+          // /gitwatch template <watcherId> <downId> reset    — restore default
+          // /gitwatch template <watcherId> <downId> <rest>   — set to <rest>
+          const watcherId = parts[1]
+          const downId = parts[2]
+          if (!watcherId || !downId) {
+            return { type: 'error', message: 'Usage: /gitwatch template <watcherId> <downstreamId> [new template | reset]' }
+          }
+          const watcher = await watcherStore.get(watcherId)
+          if (!watcher) return { type: 'error', message: `Watcher "${watcherId}" not found` }
+          const downstream = watcher.downstreams.find((d) => d.id === downId)
+          if (!downstream) return { type: 'error', message: `Downstream "${downId}" not found` }
+
+          // Extract the raw text after the first 3 whitespace-separated tokens
+          // (subcommand, watcherId, downId) to preserve newlines in the template.
+          const afterHeader = args.raw.replace(/^\s*template\s+\S+\s+\S+\s*/, '')
+
+          if (afterHeader.length === 0) {
+            const usedPlaceholders = [
+              '{upstream_repo}', '{upstream_branch}',
+              '{downstream_repo}', '{downstream_branch}',
+              '{pr_number}', '{pr_url}', '{issue_labels}',
+            ].join(', ')
+            return {
+              type: 'text',
+              text:
+                `**Template for ${downId}** (${downstream.repo}):\n\n` +
+                '```\n' + downstream.promptTemplate + '\n```\n\n' +
+                `Placeholders: ${usedPlaceholders}\n` +
+                'To change: `/gitwatch template ' + watcherId + ' ' + downId + ' <new multiline template>`\n' +
+                'To restore: `/gitwatch template ' + watcherId + ' ' + downId + ' reset`',
+            }
+          }
+
+          if (afterHeader.trim() === 'reset') {
+            downstream.promptTemplate = DEFAULT_PROMPT_TEMPLATE
+            await watcherStore.save(watcher)
+            return { type: 'text', text: `Template for ${downId} restored to default.` }
+          }
+
+          downstream.promptTemplate = afterHeader
+          await watcherStore.save(watcher)
+          return {
+            type: 'text',
+            text: `Template for ${downId} updated (${afterHeader.length} chars).`,
+          }
+        }
+
         case 'remove': {
           const watcherId = parts[1]
           if (!watcherId) return { type: 'error', message: 'Usage: /gitwatch remove <watcherId>' }
@@ -322,9 +372,16 @@ export function registerCommands(
             : await runLog.getAll()
           if (entries.length === 0) return { type: 'text', text: 'No log entries' }
           const recent = entries.slice(-10)
-          const lines = recent.map((e) =>
-            `• [${e.status}] ${e.jobId} — PR #${e.prNumber} → ${e.downstream}${e.issueUrl ? ` → ${e.issueUrl}` : ''}`,
-          )
+          const lines = recent.map((e) => {
+            const tail = e.issueUrl
+              ? ` → ${e.issueUrl}`
+              : e.skipReason
+                ? ` — skipped: ${e.skipReason}`
+                : e.error
+                  ? ` — error: ${e.error}`
+                  : ''
+            return `• [${e.status}] ${e.jobId} — PR #${e.prNumber} → ${e.downstream}${tail}`
+          })
           return { type: 'text', text: `**Recent logs (last ${recent.length}):**\n${lines.join('\n')}` }
         }
 
@@ -385,7 +442,7 @@ export function registerCommands(
         default:
           return {
             type: 'error',
-            message: `Unknown subcommand: ${sub}. Try: list, show, add, remove, downstream, status, queue, logs, retry, test, doctor, webhook-redeploy`,
+            message: `Unknown subcommand: ${sub}. Try: list, show, add, remove, downstream, template, status, queue, logs, retry, test, doctor, webhook-redeploy`,
           }
       }
     },

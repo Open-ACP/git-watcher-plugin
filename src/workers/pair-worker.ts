@@ -4,9 +4,8 @@ import type { RunLog } from '../storage/run-log.js'
 import type { QueueItem, Downstream, Watcher } from '../types.js'
 import { WorkspaceSync } from './workspace-sync.js'
 import { resolveSession } from './session-resolver.js'
-import { fillTemplate } from '../prompt/template.js'
+import { fillTemplate, parseOutcome } from '../prompt/template.js'
 import { SYSTEM_PROMPT } from '../prompt/system-prompt.js'
-import { parseIssueUrl } from '../prompt/template.js'
 import { nanoid } from 'nanoid'
 
 const RETRY_DELAY_MS = 5 * 60 * 1000  // 5 minutes
@@ -188,21 +187,29 @@ export class PairWorker {
       downstream.sessionTurnCount = (downstream.sessionTurnCount ?? 0) + 1
       await watcherStore.save(watcher)
 
-      // Parse issue URL from output
-      const parsed = parseIssueUrl(output)
-      const issueUrl = parsed?.url
-      if (!issueUrl) {
+      // Parse the terminal outcome line from agent output
+      const outcome = parseOutcome(output)
+      if (!outcome) {
         this.deps.log.warn({
           ...jobCtx,
           tail: output.slice(-500),
-        }, `git-watcher: no ISSUE_CREATED/ISSUE_EXISTS line in agent output — tail`)
+        }, `git-watcher: no outcome sentinel (ISSUE_CREATED/ISSUE_EXISTS/ISSUE_SKIPPED/ERROR) in agent output — tail`)
       }
+
+      // Agent-reported ERROR → treat as job failure (will retry or mark failed)
+      if (outcome?.kind === 'error') {
+        throw new Error(`Agent reported ERROR: ${outcome.value}`)
+      }
+
+      const issueUrl = outcome?.kind === 'created' || outcome?.kind === 'exists' ? outcome.value : undefined
+      const skipReason = outcome?.kind === 'skipped' ? outcome.value : undefined
+      const runStatus: 'success' | 'skipped' = outcome?.kind === 'skipped' ? 'skipped' : 'success'
 
       // Mark job done
       job.status = 'done'
       await queueStore.updateItem(job)
 
-      // Log success
+      // Log success/skipped
       await runLog.append({
         jobId: job.id,
         watcherId: this.watcherId,
@@ -214,11 +221,12 @@ export class PairWorker {
         sessionId,
         startedAt,
         completedAt: new Date().toISOString(),
-        status: 'success',
+        status: runStatus,
         issueUrl,
+        skipReason,
       })
 
-      this.deps.log.info({ issueUrl }, `Job ${job.id} completed`)
+      this.deps.log.info({ ...jobCtx, outcome: outcome?.kind ?? 'unknown', issueUrl, skipReason }, `git-watcher: job completed`)
     } catch (err) {
       const errObj = err instanceof Error ? err : new Error(String(err))
       const error = `[${step}] ${errObj.message}`
