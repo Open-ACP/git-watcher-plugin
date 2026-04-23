@@ -1,3 +1,5 @@
+import fs from 'node:fs'
+import path from 'node:path'
 import type { OpenACPPlugin, PluginContext, InstallContext } from '@openacp/plugin-sdk'
 import { AUTO_APPROVED_COMMANDS } from './types.js'
 import { WatcherStore } from './storage/watcher-store.js'
@@ -38,17 +40,8 @@ const plugin: OpenACPPlugin = {
   async install(ctx: InstallContext): Promise<void> {
     const { terminal, settings } = ctx
 
-    terminal.log.info('git-watcher requires Telegram to be configured for session monitoring.')
-    terminal.log.info('Sessions will be visible in Telegram topics for oversight and approval.')
-
-    const telegramChatId = await terminal.text({
-      message: 'Telegram supergroup chat ID (negative number, e.g. -1001234567890):',
-      validate: (v) => {
-        if (!v.trim()) return 'Chat ID is required'
-        if (!/^-?\d+$/.test(v.trim())) return 'Chat ID must be a number'
-        return undefined
-      },
-    })
+    // chatId is read at runtime from @openacp/telegram settings — no need to ask the user.
+    terminal.log.info('git-watcher will use your configured Telegram supergroup automatically.')
 
     const maxConcurrent = await terminal.text({
       message: 'Max concurrent AI sessions:',
@@ -61,7 +54,6 @@ const plugin: OpenACPPlugin = {
     })
 
     await settings.setAll({
-      telegramChatId: telegramChatId.trim(),
       maxConcurrentSessions: Number(maxConcurrent.trim()),
     })
 
@@ -69,10 +61,21 @@ const plugin: OpenACPPlugin = {
   },
 
   async setup(ctx: PluginContext): Promise<void> {
-    const config = ctx.pluginConfig as { telegramChatId?: string; maxConcurrentSessions?: number }
+    const config = ctx.pluginConfig as { maxConcurrentSessions?: number }
 
-    if (!config.telegramChatId) {
-      ctx.log.warn('git-watcher: telegramChatId not configured — run: openacp plugin configure @openacp/git-watcher')
+    // Read chatId from Telegram plugin settings instead of duplicating it in our own config.
+    const telegramSettingsPath = path.join(ctx.instanceRoot, 'plugins', '@openacp/telegram', 'settings.json')
+    let telegramChatId: number | null = null
+    try {
+      const raw = fs.readFileSync(telegramSettingsPath, 'utf-8')
+      const settings = JSON.parse(raw) as Record<string, unknown>
+      if (typeof settings.chatId === 'number') telegramChatId = settings.chatId
+    } catch {
+      // file missing or unreadable — Telegram not configured
+    }
+
+    if (!telegramChatId) {
+      ctx.log.warn('git-watcher: Telegram chatId not found — configure Telegram first: openacp plugin configure @openacp/telegram')
       return
     }
 
@@ -181,7 +184,6 @@ const plugin: OpenACPPlugin = {
 
     // --- Commands ---
     registerCommands(ctx, watcherStore, queueStore, runLogStore, workerPool, {
-      telegramChatId: config.telegramChatId,
       maxConcurrentSessions: config.maxConcurrentSessions ?? 3,
     }, getCurrentTunnelUrl)
 

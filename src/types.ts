@@ -1,5 +1,4 @@
 export interface PluginConfig {
-  telegramChatId: string
   maxConcurrentSessions: number
 }
 
