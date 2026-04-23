@@ -52,123 +52,182 @@ export function createWebhookRoutes(
   const cache = makeDeliveryCache()
 
   return async (fastify) => {
-    fastify.addContentTypeParser(
-      'application/json',
-      { parseAs: 'buffer' },
-      (_req: FastifyRequest, body: Buffer, done: (err: Error | null, body: Buffer) => void) => done(null, body),
-    )
+    // Fastify already has a default application/json parser (which parses to object).
+    // We need the RAW bytes for HMAC verification, so replace the default parser for our route.
+    // Replacement is scoped to this Fastify plugin instance by nature of registration.
+    try {
+      fastify.removeContentTypeParser('application/json')
+    } catch {
+      // no-op — parser may not exist at this scope
+    }
+    try {
+      fastify.addContentTypeParser(
+        'application/json',
+        { parseAs: 'buffer' },
+        (_req: FastifyRequest, body: Buffer, done: (err: Error | null, body: Buffer) => void) => done(null, body),
+      )
+    } catch (err) {
+      log.warn('git-watcher: failed to register raw-body parser', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
 
     fastify.post<{ Params: { watcherId: string } }>(
       '/git-watcher/webhooks/:watcherId',
       async (req: FastifyRequest<{ Params: { watcherId: string } }>, reply: FastifyReply) => {
-        const { watcherId } = req.params
-        const deliveryId = req.headers['x-github-delivery'] as string | undefined
-        const event = req.headers['x-github-event'] as string | undefined
-        const signature = req.headers['x-hub-signature-256'] as string | undefined
-
-        log.info('git-watcher: webhook received', {
-          watcherId,
-          deliveryId,
-          event,
-          hasSignature: Boolean(signature),
-          ip: req.ip,
-        })
-
-        if (!deliveryId || !event || !signature) {
-          log.warn('git-watcher: webhook rejected — missing headers', { watcherId, deliveryId, event, hasSignature: Boolean(signature) })
-          return reply.status(400).send({ error: 'Missing required GitHub webhook headers' })
-        }
-
-        // Dedup check
-        if (cache.has(deliveryId)) {
-          log.info('git-watcher: webhook duplicate — already processed', { watcherId, deliveryId })
-          return reply.status(200).send({ status: 'duplicate' })
-        }
-
-        const watcher = await watcherStore.get(watcherId)
-        if (!watcher) {
-          log.warn('git-watcher: webhook rejected — watcher not found', { watcherId })
-          return reply.status(404).send({ error: 'Watcher not found' })
-        }
-
-        // HMAC verification
-        const rawBody = req.body as Buffer
-        if (!verifySignature(watcher.upstream.webhookSecret, rawBody, signature)) {
-          log.warn('git-watcher: webhook rejected — invalid signature', { watcherId, deliveryId })
-          return reply.status(401).send({ error: 'Invalid signature' })
-        }
-
-        cache.add(deliveryId)
-
-        if (event !== 'pull_request') {
-          log.info('git-watcher: webhook ignored — non-PR event', { watcherId, event })
-          return reply.status(200).send({ status: 'ignored' })
-        }
-
-        const payload = JSON.parse(rawBody.toString()) as Record<string, unknown>
-        const action = payload.action as string | undefined
-        const pr = payload.pull_request as Record<string, unknown> | undefined
-        const prNumberEarly = pr?.number as number | undefined
-
-        if (!isMergedPR(payload)) {
-          log.info('git-watcher: webhook ignored — PR not merged', {
-            watcherId,
-            action,
-            prNumber: prNumberEarly,
-            merged: pr?.merged,
+        try {
+          return await handleWebhook(req, reply, watcherStore, queueStore, onNewJob, cache, log)
+        } catch (err) {
+          const errObj = err instanceof Error ? err : new Error(String(err))
+          log.error('git-watcher: webhook handler threw', {
+            watcherId: req.params.watcherId,
+            deliveryId: req.headers['x-github-delivery'],
+            event: req.headers['x-github-event'],
+            error: errObj.message,
+            stack: errObj.stack,
+            bodyType: typeof req.body,
+            bodyIsBuffer: Buffer.isBuffer(req.body),
           })
-          return reply.status(200).send({ status: 'ignored' })
+          return reply.status(500).send({ error: 'Internal error — see dev log' })
         }
-
-        const prBranch = (pr!.base as Record<string, unknown>).ref as string
-
-        // Filter by branch
-        const matchingDownstreams = watcher.downstreams.filter(
-          (d) => d.branch === prBranch || watcher.upstream.branch === prBranch,
-        )
-
-        if (matchingDownstreams.length === 0) {
-          log.info('git-watcher: webhook ignored — no matching downstreams for branch', {
-            watcherId,
-            prBranch,
-            upstreamBranch: watcher.upstream.branch,
-            downstreamBranches: watcher.downstreams.map((d) => d.branch),
-          })
-          return reply.status(200).send({ status: 'no_matching_downstreams' })
-        }
-
-        const prNumber = pr!.number as number
-        const prUrl = (pr!.html_url as string) ?? `https://github.com/${watcher.upstream.repo}/pull/${prNumber}`
-
-        // Enqueue a job for each downstream
-        const jobIds: string[] = []
-        for (const downstream of matchingDownstreams) {
-          const jobId = `job_${nanoid(8)}`
-          await queueStore.enqueue({
-            id: jobId,
-            watcherId,
-            downstreamId: downstream.id,
-            prNumber,
-            prUrl,
-            deliveryId,
-            enqueuedAt: new Date().toISOString(),
-            status: 'pending',
-            attempts: 0,
-          })
-          onNewJob(watcherId, downstream.id)
-          jobIds.push(jobId)
-        }
-
-        log.info('git-watcher: webhook triggered — jobs enqueued', {
-          watcherId,
-          prNumber,
-          prUrl,
-          count: matchingDownstreams.length,
-          jobIds,
-        })
-
-        return reply.status(200).send({ status: 'queued', count: matchingDownstreams.length })
       },
     )
   }
+}
+
+async function handleWebhook(
+  req: FastifyRequest<{ Params: { watcherId: string } }>,
+  reply: FastifyReply,
+  watcherStore: WatcherStore,
+  queueStore: QueueStore,
+  onNewJob: (watcherId: string, downstreamId: string) => void,
+  cache: DeliveryCache,
+  log: {
+    info: (msg: string, ctx?: unknown) => void
+    warn: (msg: string, ctx?: unknown) => void
+    error: (msg: string, ctx?: unknown) => void
+  },
+): Promise<FastifyReply> {
+  const { watcherId } = req.params
+  const deliveryId = req.headers['x-github-delivery'] as string | undefined
+  const event = req.headers['x-github-event'] as string | undefined
+  const signature = req.headers['x-hub-signature-256'] as string | undefined
+
+  log.info('git-watcher: webhook received', {
+    watcherId,
+    deliveryId,
+    event,
+    hasSignature: Boolean(signature),
+    ip: req.ip,
+    bodyType: typeof req.body,
+    bodyIsBuffer: Buffer.isBuffer(req.body),
+  })
+
+  if (!deliveryId || !event || !signature) {
+    log.warn('git-watcher: webhook rejected — missing headers', { watcherId, deliveryId, event, hasSignature: Boolean(signature) })
+    return reply.status(400).send({ error: 'Missing required GitHub webhook headers' })
+  }
+
+  // Dedup check
+  if (cache.has(deliveryId)) {
+    log.info('git-watcher: webhook duplicate — already processed', { watcherId, deliveryId })
+    return reply.status(200).send({ status: 'duplicate' })
+  }
+
+  const watcher = await watcherStore.get(watcherId)
+  if (!watcher) {
+    log.warn('git-watcher: webhook rejected — watcher not found', { watcherId })
+    return reply.status(404).send({ error: 'Watcher not found' })
+  }
+
+  // HMAC verification — req.body may be Buffer (ideal) or parsed object if our
+  // raw parser failed to register. Re-serialize as a fallback, but warn loudly.
+  let rawBody: Buffer
+  if (Buffer.isBuffer(req.body)) {
+    rawBody = req.body
+  } else if (typeof req.body === 'string') {
+    rawBody = Buffer.from(req.body)
+  } else {
+    log.warn('git-watcher: body was pre-parsed (HMAC will fail) — raw parser not active', {
+      watcherId,
+      bodyType: typeof req.body,
+    })
+    rawBody = Buffer.from(JSON.stringify(req.body))
+  }
+
+  if (!verifySignature(watcher.upstream.webhookSecret, rawBody, signature)) {
+    log.warn('git-watcher: webhook rejected — invalid signature', { watcherId, deliveryId })
+    return reply.status(401).send({ error: 'Invalid signature' })
+  }
+
+  cache.add(deliveryId)
+
+  if (event !== 'pull_request') {
+    log.info('git-watcher: webhook ignored — non-PR event', { watcherId, event })
+    return reply.status(200).send({ status: 'ignored' })
+  }
+
+  const payload = JSON.parse(rawBody.toString()) as Record<string, unknown>
+  const action = payload.action as string | undefined
+  const pr = payload.pull_request as Record<string, unknown> | undefined
+  const prNumberEarly = pr?.number as number | undefined
+
+  if (!isMergedPR(payload)) {
+    log.info('git-watcher: webhook ignored — PR not merged', {
+      watcherId,
+      action,
+      prNumber: prNumberEarly,
+      merged: pr?.merged,
+    })
+    return reply.status(200).send({ status: 'ignored' })
+  }
+
+  const prBranch = (pr!.base as Record<string, unknown>).ref as string
+
+  // Filter by branch
+  const matchingDownstreams = watcher.downstreams.filter(
+    (d) => d.branch === prBranch || watcher.upstream.branch === prBranch,
+  )
+
+  if (matchingDownstreams.length === 0) {
+    log.info('git-watcher: webhook ignored — no matching downstreams for branch', {
+      watcherId,
+      prBranch,
+      upstreamBranch: watcher.upstream.branch,
+      downstreamBranches: watcher.downstreams.map((d) => d.branch),
+    })
+    return reply.status(200).send({ status: 'no_matching_downstreams' })
+  }
+
+  const prNumber = pr!.number as number
+  const prUrl = (pr!.html_url as string) ?? `https://github.com/${watcher.upstream.repo}/pull/${prNumber}`
+
+  // Enqueue a job for each downstream
+  const jobIds: string[] = []
+  for (const downstream of matchingDownstreams) {
+    const jobId = `job_${nanoid(8)}`
+    await queueStore.enqueue({
+      id: jobId,
+      watcherId,
+      downstreamId: downstream.id,
+      prNumber,
+      prUrl,
+      deliveryId,
+      enqueuedAt: new Date().toISOString(),
+      status: 'pending',
+      attempts: 0,
+    })
+    onNewJob(watcherId, downstream.id)
+    jobIds.push(jobId)
+  }
+
+  log.info('git-watcher: webhook triggered — jobs enqueued', {
+    watcherId,
+    prNumber,
+    prUrl,
+    count: matchingDownstreams.length,
+    jobIds,
+  })
+
+  return reply.status(200).send({ status: 'queued', count: matchingDownstreams.length })
 }
