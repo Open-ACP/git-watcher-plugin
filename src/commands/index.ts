@@ -469,7 +469,7 @@ export function registerCommands(
         default:
           return {
             type: 'error',
-            message: `Unknown subcommand: ${sub}. Try: list, show, add, remove, downstream, template, status, queue, logs, retry, test, doctor, webhook-redeploy`,
+            message: `Unknown subcommand: \`${sub}\`. Try: list, show, add, remove, downstream, template, status, queue, logs, retry, test, doctor, webhook-redeploy`,
           }
       }
     },
