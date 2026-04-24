@@ -1,6 +1,6 @@
 {
   "name": "@openacp/git-watcher",
-  "version": "2026.423.1",
+  "version": "2026.423.2",
   "description": "Watch upstream GitHub repos for PR merges and create impact analysis issues in downstream repos",
   "type": "module",
   "main": "dist/index.js",
