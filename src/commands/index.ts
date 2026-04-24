@@ -109,7 +109,7 @@ export function registerCommands(
           }
           const repo = parseRepoInput(repoArg)
           if (!repo) {
-            return { type: 'error', message: `Invalid repo: "${repoArg}". Use owner/repo or a GitHub URL.` }
+            return { type: 'error', message: `Invalid repo: \`${repoArg}\`. Use owner/repo or a GitHub URL.` }
           }
 
           const tunnelUrl = getCurrentTunnelUrl()
@@ -127,7 +127,7 @@ export function registerCommands(
           } catch (err) {
             return {
               type: 'error',
-              message: `Failed to register GitHub webhook: ${(err as Error).message}`,
+              message: `Failed to register GitHub webhook: ${escapeMd((err as Error).message)}`,
             }
           }
 
@@ -167,7 +167,7 @@ export function registerCommands(
             }
             const repo = parseRepoInput(repoArg)
             if (!repo) {
-              return { type: 'error', message: `Invalid repo: "${repoArg}". Use owner/repo or a GitHub URL.` }
+              return { type: 'error', message: `Invalid repo: \`${repoArg}\`. Use owner/repo or a GitHub URL.` }
             }
             const watcher = await watcherStore.get(watcherId)
             if (!watcher) return { type: 'error', message: `Watcher \`${watcherId}\` not found` }
