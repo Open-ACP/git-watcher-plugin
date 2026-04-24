@@ -1,5 +1,14 @@
 import { nanoid } from 'nanoid'
 import type { PluginContext } from '@openacp/plugin-sdk'
+
+/**
+ * Escape Telegram Markdown V1 special chars in free-form strings that will be
+ * interpolated outside of backtick blocks. V1 treats unmatched `_`, `*`, `` ` ``,
+ * and `[` as entity delimiters and rejects the whole message if they don't pair.
+ */
+function escapeMd(s: string): string {
+  return s.replace(/([_*`\[])/g, '\\$1')
+}
 import type { WatcherStore } from '../storage/watcher-store.js'
 import type { QueueStore } from '../storage/queue-store.js'
 import type { RunLog } from '../storage/run-log.js'
@@ -77,7 +86,7 @@ export function registerCommands(
           const id = parts[1]
           if (!id) return { type: 'error', message: 'Usage: /gitwatch show <watcherId>' }
           const watcher = await watcherStore.get(id)
-          if (!watcher) return { type: 'error', message: `Watcher "${id}" not found` }
+          if (!watcher) return { type: 'error', message: `Watcher \`${id}\` not found` }
           const lines = [
             `*${watcher.id}*`,
             `Upstream: \`${watcher.upstream.repo}\` @ \`${watcher.upstream.branch}\``,
@@ -133,11 +142,11 @@ export function registerCommands(
           return {
             type: 'text',
             text:
-              `✅ Watcher created: *${watcherId}*\n` +
+              `✅ Watcher created: \`${watcherId}\`\n` +
               `Upstream: \`${repo}\` @ \`${branch}\`\n` +
-              `Webhook: #${hookId} → ${webhookUrl}\n\n` +
+              `Webhook: #${hookId} → \`${webhookUrl}\`\n\n` +
               `Next: add a downstream with\n` +
-              `/gitwatch downstream add ${watcherId} <repo-or-url> [branch]`,
+              `\`/gitwatch downstream add ${watcherId} <repo-or-url> [branch]\``,
           }
         }
 
@@ -161,7 +170,7 @@ export function registerCommands(
               return { type: 'error', message: `Invalid repo: "${repoArg}". Use owner/repo or a GitHub URL.` }
             }
             const watcher = await watcherStore.get(watcherId)
-            if (!watcher) return { type: 'error', message: `Watcher "${watcherId}" not found` }
+            if (!watcher) return { type: 'error', message: `Watcher \`${watcherId}\` not found` }
 
             const core = ctx.core as {
               agentManager: { getAvailableAgents: () => Array<{ name: string }> }
@@ -182,7 +191,7 @@ export function registerCommands(
               if (!installed.includes(agentArg)) {
                 return {
                   type: 'error',
-                  message: `Agent "${agentArg}" not installed. Installed: ${installed.join(', ')}`,
+                  message: `Agent \`${agentArg}\` not installed. Installed: ${installed.map((n) => '`' + n + '`').join(', ')}`,
                 }
               }
               agent = agentArg
@@ -209,7 +218,7 @@ export function registerCommands(
             await queueStore.addPairToIndex(watcherId, downstreamId)
             return {
               type: 'text',
-              text: `Added downstream ${downstreamId}: \`${repo}\` @ \`${branch}\` using agent \`${agent}\``,
+              text: `Added downstream \`${downstreamId}\`: \`${repo}\` @ \`${branch}\` using agent \`${agent}\``,
             }
           }
 
@@ -220,12 +229,12 @@ export function registerCommands(
               return { type: 'error', message: 'Usage: /gitwatch downstream remove <watcherId> <downstreamId>' }
             }
             const watcher = await watcherStore.get(watcherId)
-            if (!watcher) return { type: 'error', message: `Watcher "${watcherId}" not found` }
+            if (!watcher) return { type: 'error', message: `Watcher \`${watcherId}\` not found` }
             watcher.downstreams = watcher.downstreams.filter((d) => d.id !== downId)
             await watcherStore.save(watcher)
             await queueStore.removePairFromIndex(watcherId, downId)
             workerPool.delete(watcherId, downId)
-            return { type: 'text', text: `Removed downstream ${downId}` }
+            return { type: 'text', text: `Removed downstream \`${downId}\`` }
           }
 
           return { type: 'error', message: 'Usage: /gitwatch downstream <add|remove> ...' }
@@ -241,9 +250,9 @@ export function registerCommands(
             return { type: 'error', message: 'Usage: /gitwatch template <watcherId> <downstreamId> [new template | reset]' }
           }
           const watcher = await watcherStore.get(watcherId)
-          if (!watcher) return { type: 'error', message: `Watcher "${watcherId}" not found` }
+          if (!watcher) return { type: 'error', message: `Watcher \`${watcherId}\` not found` }
           const downstream = watcher.downstreams.find((d) => d.id === downId)
-          if (!downstream) return { type: 'error', message: `Downstream "${downId}" not found` }
+          if (!downstream) return { type: 'error', message: `Downstream \`${downId}\` not found` }
 
           // Extract the raw text after the first 3 whitespace-separated tokens
           // (subcommand, watcherId, downId) to preserve newlines in the template.
@@ -251,14 +260,14 @@ export function registerCommands(
 
           if (afterHeader.length === 0) {
             const usedPlaceholders = [
-              '{upstream_repo}', '{upstream_branch}',
-              '{downstream_repo}', '{downstream_branch}',
-              '{pr_number}', '{pr_url}', '{issue_labels}',
+              '`{upstream_repo}`', '`{upstream_branch}`',
+              '`{downstream_repo}`', '`{downstream_branch}`',
+              '`{pr_number}`', '`{pr_url}`', '`{issue_labels}`',
             ].join(', ')
             return {
               type: 'text',
               text:
-                `*Template for ${downId}* (${downstream.repo}):\n\n` +
+                `Template for \`${downId}\` (\`${downstream.repo}\`):\n\n` +
                 '```\n' + downstream.promptTemplate + '\n```\n\n' +
                 `Placeholders: ${usedPlaceholders}\n` +
                 'To change: `/gitwatch template ' + watcherId + ' ' + downId + ' <new multiline template>`\n' +
@@ -269,14 +278,14 @@ export function registerCommands(
           if (afterHeader.trim() === 'reset') {
             downstream.promptTemplate = DEFAULT_PROMPT_TEMPLATE
             await watcherStore.save(watcher)
-            return { type: 'text', text: `Template for ${downId} restored to default.` }
+            return { type: 'text', text: `Template for \`${downId}\` restored to default.` }
           }
 
           downstream.promptTemplate = afterHeader
           await watcherStore.save(watcher)
           return {
             type: 'text',
-            text: `Template for ${downId} updated (${afterHeader.length} chars).`,
+            text: `Template for \`${downId}\` updated (${afterHeader.length} chars).`,
           }
         }
 
@@ -284,21 +293,21 @@ export function registerCommands(
           const watcherId = parts[1]
           if (!watcherId) return { type: 'error', message: 'Usage: /gitwatch remove <watcherId>' }
           const watcher = await watcherStore.get(watcherId)
-          if (!watcher) return { type: 'error', message: `Watcher "${watcherId}" not found` }
+          if (!watcher) return { type: 'error', message: `Watcher \`${watcherId}\` not found` }
 
           let webhookNote = ''
           if (watcher.upstream.webhookId) {
             const res = deleteGithubWebhook(watcher.upstream.repo, watcher.upstream.webhookId)
             webhookNote = res.ok
               ? ` (GitHub webhook #${watcher.upstream.webhookId} deleted)`
-              : ` (⚠️ failed to delete GitHub webhook: ${res.error})`
+              : ` (⚠️ failed to delete GitHub webhook: ${escapeMd(res.error ?? 'unknown error')})`
           }
 
           await watcherStore.delete(watcherId)
           for (const d of watcher.downstreams) {
             workerPool.delete(watcherId, d.id)
           }
-          return { type: 'text', text: `Removed watcher ${watcherId}${webhookNote}` }
+          return { type: 'text', text: `Removed watcher \`${watcherId}\`${webhookNote}` }
         }
 
         case 'test': {
@@ -311,7 +320,7 @@ export function registerCommands(
           if (isNaN(prNumber)) return { type: 'error', message: 'prNumber must be an integer' }
 
           const watcher = await watcherStore.get(watcherId)
-          if (!watcher) return { type: 'error', message: `Watcher "${watcherId}" not found` }
+          if (!watcher) return { type: 'error', message: `Watcher \`${watcherId}\` not found` }
           if (watcher.downstreams.length === 0) {
             return { type: 'error', message: 'Watcher has no downstreams. Add one first.' }
           }
@@ -335,7 +344,7 @@ export function registerCommands(
           }
           return {
             type: 'text',
-            text: `Enqueued ${enqueued} job(s) for PR #${prNumber} on ${watcher.upstream.repo}`,
+            text: `Enqueued ${enqueued} job(s) for PR #${prNumber} on \`${watcher.upstream.repo}\``,
           }
         }
 
@@ -377,7 +386,7 @@ export function registerCommands(
           const items = await queueStore.getItems(watcherId, downId)
           if (items.length === 0) return { type: 'text', text: 'Queue is empty' }
           const lines = items.map((i) =>
-            `• ${i.id} [${i.status}] PR #${i.prNumber} (attempts: ${i.attempts})${i.error ? ` — ${i.error}` : ''}`,
+            `• \`${i.id}\` [${i.status}] PR #${i.prNumber} (attempts: ${i.attempts})${i.error ? ` — ${escapeMd(i.error)}` : ''}`,
           )
           return { type: 'text', text: `*Queue (${items.length}):*\n${lines.join('\n')}` }
         }
@@ -390,17 +399,17 @@ export function registerCommands(
             : await runLog.getAll()
           if (entries.length === 0) return { type: 'text', text: 'No log entries' }
           const recent = entries.slice(-10)
-          const lines = recent.map((e) => {
+          const recentLines = recent.map((e) => {
             const tail = e.issueUrl
               ? ` → ${e.issueUrl}`
               : e.skipReason
-                ? ` — skipped: ${e.skipReason}`
+                ? ` — skipped: ${escapeMd(e.skipReason)}`
                 : e.error
-                  ? ` — error: ${e.error}`
+                  ? ` — error: ${escapeMd(e.error)}`
                   : ''
-            return `• [${e.status}] ${e.jobId} — PR #${e.prNumber} → ${e.downstream}${tail}`
+            return `• [${e.status}] \`${e.jobId}\` — PR #${e.prNumber} → \`${e.downstream}\`${tail}`
           })
-          return { type: 'text', text: `*Recent logs (last ${recent.length}):*\n${lines.join('\n')}` }
+          return { type: 'text', text: `*Recent logs (last ${recent.length}):*\n${recentLines.join('\n')}` }
         }
 
         case 'retry': {
@@ -412,14 +421,14 @@ export function registerCommands(
           }
           const items = await queueStore.getItems(watcherId, downId)
           const job = items.find((i) => i.id === jobId)
-          if (!job) return { type: 'error', message: `Job "${jobId}" not found` }
+          if (!job) return { type: 'error', message: `Job \`${jobId}\` not found` }
           job.status = 'pending'
           job.attempts = 0
           job.retryAfter = undefined
           job.error = undefined
           await queueStore.updateItem(job)
           workerPool.notify(watcherId, downId)
-          return { type: 'text', text: `Retrying job ${jobId}` }
+          return { type: 'text', text: `Retrying job \`${jobId}\`` }
         }
 
         case 'doctor': {
