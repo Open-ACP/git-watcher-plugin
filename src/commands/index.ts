@@ -62,12 +62,15 @@ export function registerCommands(
         case 'list': {
           const watchers = await watcherStore.list()
           if (watchers.length === 0) {
-            return { type: 'text', text: 'No watchers configured. Use /gitwatch add to create one.' }
+            return {
+              type: 'text',
+              text: 'No watchers configured yet.\nCreate one with: /gitwatch add <repo-or-url> [branch]',
+            }
           }
           const lines = watchers.map((w) =>
-            `• **${w.id}** — upstream: \`${w.upstream.repo}\` (${w.upstream.branch}) → ${w.downstreams.length} downstream(s)`,
+            `• *${w.id}* — upstream: \`${w.upstream.repo}\` (${w.upstream.branch}) → ${w.downstreams.length} downstream(s)`,
           )
-          return { type: 'text', text: `**Watchers (${watchers.length}):**\n${lines.join('\n')}` }
+          return { type: 'text', text: `*Watchers (${watchers.length}):*\n${lines.join('\n')}` }
         }
 
         case 'show': {
@@ -76,13 +79,15 @@ export function registerCommands(
           const watcher = await watcherStore.get(id)
           if (!watcher) return { type: 'error', message: `Watcher "${id}" not found` }
           const lines = [
-            `**${watcher.id}**`,
+            `*${watcher.id}*`,
             `Upstream: \`${watcher.upstream.repo}\` @ \`${watcher.upstream.branch}\``,
             `Webhook ID: ${watcher.upstream.webhookId || 'not registered'}`,
             `Downstreams (${watcher.downstreams.length}):`,
-            ...watcher.downstreams.map((d) =>
-              `  • **${d.id}** — \`${d.repo}\` @ \`${d.branch}\` [${d.sessionStrategy}]`,
-            ),
+            ...(watcher.downstreams.length === 0
+              ? ['  (none — /gitwatch downstream add)']
+              : watcher.downstreams.map((d) =>
+                  `  • *${d.id}* — \`${d.repo}\` @ \`${d.branch}\` [${d.sessionStrategy}]`,
+                )),
           ]
           return { type: 'text', text: lines.join('\n') }
         }
@@ -128,7 +133,7 @@ export function registerCommands(
           return {
             type: 'text',
             text:
-              `✅ Watcher created: **${watcherId}**\n` +
+              `✅ Watcher created: *${watcherId}*\n` +
               `Upstream: \`${repo}\` @ \`${branch}\`\n` +
               `Webhook: #${hookId} → ${webhookUrl}\n\n` +
               `Next: add a downstream with\n` +
@@ -253,7 +258,7 @@ export function registerCommands(
             return {
               type: 'text',
               text:
-                `**Template for ${downId}** (${downstream.repo}):\n\n` +
+                `*Template for ${downId}* (${downstream.repo}):\n\n` +
                 '```\n' + downstream.promptTemplate + '\n```\n\n' +
                 `Placeholders: ${usedPlaceholders}\n` +
                 'To change: `/gitwatch template ' + watcherId + ' ' + downId + ' <new multiline template>`\n' +
@@ -336,17 +341,30 @@ export function registerCommands(
 
         case 'status': {
           const watchers = await watcherStore.list()
-          const lines = ['**git-watcher status:**']
+          if (watchers.length === 0) {
+            return {
+              type: 'text',
+              text: 'No watchers configured yet — nothing to report.\nCreate one with: /gitwatch add <repo-or-url> [branch]',
+            }
+          }
+          const lines = ['*git-watcher status:*']
+          let totalDownstreams = 0
           for (const w of watchers) {
-            lines.push(`\n**${w.id}** (${w.upstream.repo})`)
+            lines.push(`\n*${w.id}* (\`${w.upstream.repo}\`)`)
+            if (w.downstreams.length === 0) {
+              lines.push('  (no downstreams paired yet — /gitwatch downstream add)')
+              continue
+            }
             for (const d of w.downstreams) {
+              totalDownstreams++
               const items = await queueStore.getItems(w.id, d.id)
               const pending = items.filter((i) => i.status === 'pending').length
               const processing = items.filter((i) => i.status === 'processing').length
               const failed = items.filter((i) => i.status === 'failed').length
-              lines.push(`  • ${d.id} (${d.repo}): pending=${pending} processing=${processing} failed=${failed}`)
+              lines.push(`  • ${d.id} (\`${d.repo}\`): pending=${pending} processing=${processing} failed=${failed}`)
             }
           }
+          lines.push(`\n${watchers.length} watcher(s), ${totalDownstreams} downstream(s)`)
           return { type: 'text', text: lines.join('\n') }
         }
 
@@ -361,7 +379,7 @@ export function registerCommands(
           const lines = items.map((i) =>
             `• ${i.id} [${i.status}] PR #${i.prNumber} (attempts: ${i.attempts})${i.error ? ` — ${i.error}` : ''}`,
           )
-          return { type: 'text', text: `**Queue (${items.length}):**\n${lines.join('\n')}` }
+          return { type: 'text', text: `*Queue (${items.length}):*\n${lines.join('\n')}` }
         }
 
         case 'logs': {
@@ -382,7 +400,7 @@ export function registerCommands(
                   : ''
             return `• [${e.status}] ${e.jobId} — PR #${e.prNumber} → ${e.downstream}${tail}`
           })
-          return { type: 'text', text: `**Recent logs (last ${recent.length}):**\n${lines.join('\n')}` }
+          return { type: 'text', text: `*Recent logs (last ${recent.length}):*\n${lines.join('\n')}` }
         }
 
         case 'retry': {
@@ -405,7 +423,7 @@ export function registerCommands(
         }
 
         case 'doctor': {
-          const lines = ['**git-watcher doctor:**']
+          const lines = ['*git-watcher doctor:*']
           // Check gh auth
           try {
             const { execSync } = await import('node:child_process')
